@@ -35,18 +35,66 @@ using namespace ns3;
 class ConvergenceExperiments {
 public:
   ConvergenceExperiments();
+  ConvergenceExperiments(const std::string& flow_arrivals_filename,
+                         const std::string& flow_departures_filename,
+                         const std::string& events_filename,
+                         const std::string& flows_filename,
+                         const std::string& opt_rates_filename);
   void parseCmdConfig(int argc, char *argv[]);
   void run();
   
 private:
-  void createTopology();
-  void setupApps();
-  void printExperimentStats();
+  void loadWorkloadFromFiles();
+  void loadFlowArrivals();
+  void loadFlowDepartures();
+  void loadEvents();
+  void loadAllFlows();
+  void loadOptRates();
+  void showWorkloadFromFiles();
+
+  void createTopology();  
   void setupFlowMonitor();
   void setConfigDefaults();
 
+  void startApp(uint16_t port, uint32_t source_host,
+                uint32_t destination_host, Time start_time);
+  void stopApp(uint32_t flow_id);
+
+  // I think startNextEpoch is called every 20ms or as soon as 95% flows
+  // have converged.. scheduled form startNextEpoch, canceled and re-scheduled
+  // by checkRates
+  void startNextEpoch();
+
+  // fills in flowToFlowId (so we can get correct FlowMonitor stats for each flow)
+  // only uses source, destination IP address and destination port
+  void mapFlowToFlowMonitorStats();
+  void printExperimentStatsForWorkload();
+  void printSingleFlowStats(const FlowMonitor::FlowStats& flow_stats);
+
+  Time last_epoch_time; // time when startNextEpoch was last called
+  uint32_t next_epoch = 1;
+  EventId next_epoch_event;
+  
+  std::string flow_arrivals_filename; // epoch flow_index
+  std::string flow_departures_filename; // epoch flow_index
+  std::string events_filename; // start_flows | stop_flows
+  std::string flows_filename; // src host, dst host
+  std::string opt_rates_filename; // [flow_index: rate]+
+
+  std::vector<std::vector<uint32_t> > flows_to_start;
+  std::vector<std::vector<uint32_t> > flows_to_stop;
+  std::list<bool> event_list; // true: start flows
+  
+  std::vector<std::pair<uint32_t, uint32_t> > all_flows; // source, destination
+  std::vector<uint16_t> all_flows_port; // TODO(lav): maybe merge with ^
+
+  std::map<uint32_t, std::map<uint32_t, double> > opt_rates; // indexed by epoch
+  
+  bool using_files = false; // true if we load workload from files
+
   double simulationTime = 10; //seconds
   uint32_t payloadSize = 1448;
+  Time max_epoch_seconds = Seconds(0.2);
   
   NodeContainer hosts;  
   NodeContainer leafnodes;
@@ -56,6 +104,17 @@ private:
   Ipv4InterfaceContainer interfaces;
   QueueDiscContainer qdiscs;
 
+  // filled in by setupApp
+  ApplicationContainer sink_apps;
+  ApplicationContainer sending_apps;
+  std::map<uint32_t, uint32_t> flowToAppIndex;
+  std::map<Ipv4FlowClassifier::FiveTuple, uint32_t> fiveTupleToFlow;
+  
+  // flow monitor indexes all observed flows by a "FlowId", different from index of flow in flows file
+  // currently this is populated at the end, but maybe want to update it each time flow monitor adds a new flow
+  std::map<uint32_t, FlowId> flowToFlowMonitorIndex; 
+  
+  // used by old setupApps TODO(lav): remove
   ApplicationContainer sinkApp;
   ApplicationContainer apps;
 

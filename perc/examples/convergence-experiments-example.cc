@@ -52,7 +52,13 @@ int
 main (int argc, char *argv[])
 {
   
-  ConvergenceExperiments exp;
+  //ConvergenceExperiments exp;
+  ConvergenceExperiments exp("src/perc/examples/flow_arrivals_1.txt",
+                         "src/perc/examples/flow_departures_1.txt",
+                         "src/perc/examples/events_1.txt",
+                         "src/perc/examples/flows_1.txt",
+                         "src/perc/examples/opt_rates_1.txt");
+
   exp.parseCmdConfig(argc, argv);
   exp.run();
   return 0;

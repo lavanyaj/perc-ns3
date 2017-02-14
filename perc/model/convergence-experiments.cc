@@ -19,6 +19,13 @@
  * Based on xfabric experiments at https://bitbucket.org/knagaraj/numfabric
  */
 
+#include <iostream>
+#include <sstream>
+#include <map>
+#include <utility> // pair
+#include <vector>
+#include <list>
+
 #include "ns3/core-module.h"
 #include "ns3/network-module.h"
 #include "ns3/internet-module.h"
@@ -26,6 +33,8 @@
 #include "ns3/applications-module.h"
 #include "ns3/traffic-control-module.h"
 #include "ns3/flow-monitor-module.h"
+#include "../helper/sending-helper.h"
+#include "sending-application.h"
 #include "convergence-experiments.h"
 
 using namespace ns3;
@@ -35,39 +44,54 @@ NS_LOG_COMPONENT_DEFINE ("ConvergenceExperiments");
 void
 TcPacketsInQueueTrace (uint32_t oldValue, uint32_t newValue)
 {
-  std::cout << "TcPacketsInQueue " << oldValue << " to " << newValue << std::endl;
+  //std::cout << "TcPacketsInQueue " << oldValue << " to " << newValue << std::endl;
 }
 
 void
 DevicePacketsInQueueTrace (uint32_t oldValue, uint32_t newValue)
 {
-  std::cout << "DevicePacketsInQueue " << oldValue << " to " << newValue << std::endl;
+  //std::cout << "DevicePacketsInQueue " << oldValue << " to " << newValue << std::endl;
 }
 
 void ConvergenceExperiments::run() {
+  NS_LOG_FUNCTION (this);
   createTopology();
-  setupApps();
+  if (event_list.size() > 0) startNextEpoch();
   setConfigDefaults();
   setupFlowMonitor();
   
   Simulator::Stop (Seconds (simulationTime + 5));
   Simulator::Run ();
-  // Not sure what 1 flow is, maybe distinguished by 5 tuple
-  printExperimentStats();  
+  printExperimentStatsForWorkload();  
   // Note that this also destroys all queues of ptpnd (but not qdiscs)
   Simulator::Destroy ();
 }
 
 void ConvergenceExperiments::parseCmdConfig(int argc, char *argv[]) {
+  NS_LOG_FUNCTION (this);
   CommandLine cmd;
   cmd.AddValue ("transportProt", "Transport protocol to use: Tcp, Udp", transportProt);
   cmd.Parse (argc, argv);
 }
 
 ConvergenceExperiments::ConvergenceExperiments() {
+  NS_LOG_FUNCTION (this);
 }
 
-void ConvergenceExperiments::createTopology() {  
+ConvergenceExperiments::ConvergenceExperiments(
+                                               const std::string& flow_arrivals_filename,
+                                               const std::string& flow_departures_filename,
+                                               const std::string& events_filename,
+                                               const std::string& flows_filename,
+                                               const std::string& opt_rates_filename) :
+  flow_arrivals_filename(flow_arrivals_filename), flow_departures_filename(flow_departures_filename), events_filename(events_filename), flows_filename(flows_filename), opt_rates_filename(opt_rates_filename) {
+  NS_LOG_FUNCTION (this);
+  loadWorkloadFromFiles();
+  showWorkloadFromFiles();
+}
+
+void ConvergenceExperiments::createTopology() {
+  NS_LOG_FUNCTION (this);
   if (transportProt.compare ("Tcp") == 0)
     {
       socketType = "ns3::TcpSocketFactory";
@@ -120,6 +144,7 @@ void ConvergenceExperiments::createTopology() {
   // can also uninstall after assigning IP address, see traffic-control.cc.1
   
   // TODO: Queue discs everywhere even switch links (maybe use this for control/ data)
+  
   for (uint32_t edgedeviceno = 0; edgedeviceno < edgedevices.GetN(); edgedeviceno++) {
     // This will segfault if you didn't add an internal queue and root queue disc
     Ptr<QueueDisc> q = qdiscs.Get (edgedeviceno);
@@ -149,7 +174,8 @@ void ConvergenceExperiments::createTopology() {
     // assign returns two interface addrs for
     //  the net device from host to leaf
     //  and the netdevice from leaf to host
-    // index into downlink to host i using i*2+ 1 (i from 0, ..)
+    //  NOTE!! Ipv4 address of NIC at host h = interfaces.GetAddress(host*2);
+    //  TODO(lav): make function to get this, since it depends on topology setup
     interfaces.Add(address.Assign (edgedevices.Get(edgedeviceno)));
   }
   //tch.Uninstall (tordowns);
@@ -157,105 +183,181 @@ void ConvergenceExperiments::createTopology() {
   Ipv4GlobalRoutingHelper::PopulateRoutingTables ();
 }
 
-void ConvergenceExperiments::setupApps() {
-    // I want 3 hosts sending to one until convergence/ max time
-  // each flow from a host starts from a new port at src host
-  // and sends to a fixed port at dst host (7)
-  // packetSinkHelper address and port at construct used for what!?
-  
-  uint32_t incastdstno = hosts.GetN()-1;
-  
-  // Install packet sink at incast destination host  
-  uint16_t port = 7;
-  Address localAddress (InetSocketAddress (Ipv4Address::GetAny (), port));
-  PacketSinkHelper packetSinkHelper (socketType, localAddress);
-  sinkApp = packetSinkHelper.Install(hosts.Get (incastdstno));
-  sinkApp.Start (Seconds (0.0));
-  sinkApp.Stop (Seconds (simulationTime + 0.1));    
-
-  // Install packet generator at all other hosts
-  AddressValue remoteAddress (InetSocketAddress (interfaces.GetAddress (incastdstno*2), port));
-
-
-  for (uint32_t hostno = 0; hostno < hosts.GetN(); hostno++) {
-    if (hostno == incastdstno) continue;
-    // I think need a separate helper for each flow since
-    // TCP source address is going to be the IP address supplied here (?)
-    // And TCP source port is going to be ??
-    OnOffHelper onoff (socketType, Ipv4Address::GetAny ());
-    onoff.SetAttribute ("OnTime",  StringValue ("ns3::ConstantRandomVariable[Constant=1]"));
-    onoff.SetAttribute ("OffTime", StringValue ("ns3::ConstantRandomVariable[Constant=0]"));
-    onoff.SetAttribute ("PacketSize", UintegerValue (payloadSize));
-    onoff.SetAttribute ("DataRate", StringValue ("50Mbps")); //bit/s
-    if (hostno == 0)
-      onoff.SetAttribute ("HighPriority", BooleanValue (true)); //bit/s
-    // Remote attribute bound to m_peer, used when creating socket
-    onoff.SetAttribute ("Remote", remoteAddress);
-    apps.Add (onoff.Install (hosts.Get (hostno)));
-    apps.Start (Seconds (1.0));
-    apps.Stop (Seconds (simulationTime + 0.1));
-
-  }
-  //Flow
-  // uint16_t port = 7;
-  // Address localAddress (InetSocketAddress (Ipv4Address::GetAny (), port));
-  // // application that receives PacketSinkHelper: public Application TODO: lav adapt this?
-  // PacketSinkHelper packetSinkHelper (socketType, localAddress);
-  // ApplicationContainer sinkApp = packetSinkHelper.Install (nodes.Get (0));
-
-  // sinkApp.Start (Seconds (0.0));
-  // sinkApp.Stop (Seconds (simulationTime + 0.1));
-
-
-  // QUESTION: three IP addresses?on for sinkApp one for contructing onoff app and remote for onoff
-  // I think the contructor address is ignored (basically used when sending packets)
-  // OnOffHelper onoff (socketType, Ipv4Address::GetAny ());
-  // onoff.SetAttribute ("OnTime",  StringValue ("ns3::ConstantRandomVariable[Constant=1]"));
-  // onoff.SetAttribute ("OffTime", StringValue ("ns3::ConstantRandomVariable[Constant=0]"));
-  // onoff.SetAttribute ("PacketSize", UintegerValue (payloadSize));
-  // onoff.SetAttribute ("DataRate", StringValue ("50Mbps")); //bit/s
-  // ApplicationContainer apps;
-
-  // Remote attribute bound to m_peer in onoff application used when creating socket
-  // AddressValue remoteAddress (InetSocketAddress (interfaces.GetAddress (0), port));
-  // onoff.SetAttribute ("Remote", remoteAddress);
-  // apps.Add (onoff.Install (nodes.Get (1)));
-  // apps.Start (Seconds (1.0));
-  // apps.Stop (Seconds (simulationTime + 0.1));
+void ConvergenceExperiments::stopApp(uint32_t flow_id) {
+  NS_LOG_FUNCTION (this << flow_id);
+  uint32_t app_index = flowToAppIndex.at(flow_id);
+  // since StopApplication is private I have to put app in container and call stop
+  ApplicationContainer sending_app(sending_apps.Get(app_index));
+  //sending_app.Stop(Seconds(0.0));
+  //ApplicationContainer sink_app(sink_apps.Get(app_index));
+  //sink_app.Stop(Seconds(0.0));
+  // maybe remove the sink_apps object also
 }
 
-void ConvergenceExperiments::printExperimentStats() {
+// will add a new app/ sink app for given flow info
+void ConvergenceExperiments::startApp(uint16_t port, uint32_t source_host, uint32_t destination_host, Time start_time) {
+  NS_LOG_FUNCTION (this << port << source_host << destination_host << start_time);
+  // Install packet sink at destination host    
+  Address localAddress (InetSocketAddress (Ipv4Address::GetAny (), port));
+  PacketSinkHelper packetSinkHelper (socketType, localAddress);
+
+  // apparently packetSinkHelper.Install returns ApplicationContainer
+  ApplicationContainer sink_app = packetSinkHelper.Install(hosts.Get (destination_host));
+  sink_apps.Add(sink_app);
+  sink_app.Start(start_time);
+
+  // Install packet generator at all other hosts
+  AddressValue remoteAddress (InetSocketAddress (interfaces.GetAddress (destination_host*2), port));
+
+  SendingHelper sending (socketType, remoteAddress);
+  sending.SetAttribute ("MaxBytes", UintegerValue (0)); //10 * payloadSize));
+  sending.SetAttribute ("PacketSize", UintegerValue (payloadSize));
+  sending.SetAttribute ("InitialDataRate", StringValue ("1Mbps")); //bit/s
+  //if (hostno == 0)
+  //  sending.SetAttribute ("HighPriority", BooleanValue (true)); //bit/s
+  // Remote attribute bound to m_peer, used when creating socket
+  // And sending.Install returns ApplicationContainer
+  ApplicationContainer sending_app = sending.Install (hosts.Get (source_host));
+  sending_apps.Add(sending_app);  
+  sending_app.Start(start_time);
+}
+
+// Gets next event, schedules start or stop flows events and reschedules itself
+// note that checkRates might re-reschedule the next startNextEpoch if flows
+// converge early
+void ConvergenceExperiments::startNextEpoch() {
+  NS_LOG_FUNCTION (this);
+  // NS_ASSERT(event_list.size() > 0);
+  bool start_flows_next = event_list.front();
+  event_list.pop_front();
+  NS_ASSERT(next_epoch > 0);
+  if (start_flows_next) {
+    // vector, indexing start at 0
+    const auto& flows = flows_to_start.at(next_epoch-1);    
+    for (const auto& f : flows) {
+      uint32_t source = all_flows.at(f).first;
+      uint32_t destination = all_flows.at(f).second;
+      uint16_t port = all_flows_port.at(f);
+      // for logging
+      Ipv4Address source_address = interfaces.GetAddress(source*2);
+      Ipv4Address destination_address = interfaces.GetAddress(destination*2);
+      Ipv4FlowClassifier::FiveTuple t =
+        { source_address, destination_address, 0, 0, port};
+      std::cout << "Starting flow # " << f << ": "
+                << " sourceAddress=" << t.sourceAddress << "/"
+                << " destinationAddress=" << t.destinationAddress << "/"
+                << " protocol=?/"
+                << " sourcePort=?/"
+                << " destinationPort=" << t.destinationPort
+                << " at time " << Simulator::Now() << "\n";
+      startApp(port, source, destination, Simulator::Now());
+      // NS_ASSERT(flowToAppIndex.find(f) == flowToAppIndex::end)
+      flowToAppIndex[f] = sending_apps.GetN()-1;      
+      fiveTupleToFlow[t] = f;
+      // NS_ASSERT(sending_apps.GetN() == sink_apps.GetN())
+    }
+  } else {
+    // vector, indexing start at 0
+    const auto& flows = flows_to_stop.at(next_epoch-1);
+    for (const auto& f : flows) {
+      stopApp(f);
+    }    
+  }
+  last_epoch_time = Simulator::Now(); // TODO(lav): not used?
+
+  if (event_list.size() > 0) {
+    next_epoch_event = Simulator::Schedule(max_epoch_seconds,
+                                           &ConvergenceExperiments::startNextEpoch, this);
+    next_epoch++;
+  } else {
+    Simulator::Stop();
+  }
+  
+}
+
+// fills in flowToFlowId (so we can get correct FlowMonitor stats for each flow)
+// only uses source, destination IP address and destination port
+void ConvergenceExperiments::mapFlowToFlowMonitorStats() {
+  Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier> (flowmon.GetClassifier ());
+  std::map<FlowId, FlowMonitor::FlowStats> stats = monitor->GetFlowStats ();
+  for (const auto& fm_iter : stats) {
+    Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow (fm_iter.first);
+    bool found = false;
+    for (const auto& iter : fiveTupleToFlow) {
+      if (iter.first.sourceAddress == t.sourceAddress &&
+          iter.first.destinationAddress == t.destinationAddress &&
+          iter.first.destinationPort == t.destinationPort) {
+        flowToFlowMonitorIndex[iter.second] = fm_iter.first;
+        found = true;
+      } else if (iter.first.destinationAddress == t.sourceAddress &&
+          iter.first.sourceAddress == t.destinationAddress &&
+          iter.first.destinationPort == t.sourcePort) {
+        found = true; // found FlowMonitor flow for ACK
+      }
+    }
+    if (!found) {
+      std::cout << "didn't find flow_id for stats for "
+                << " flowId(FlowMonitor)=" << fm_iter.first << "/"
+                << " sourceAddress=" << t.sourceAddress << "/"
+                << " destinationAddress=" << t.destinationAddress << "/"
+                << " protocol=" << int(t.protocol) << "/"
+                << " sourcePort=" << t.sourcePort << "/"
+                << " destinationPort=" << t.destinationPort << "\n";
+    }
+  }
+}
+
+
+void ConvergenceExperiments::printSingleFlowStats(const FlowMonitor::FlowStats& flow_stats) {
+  std::cout << "  Tx Packets:   " << flow_stats.txPackets << std::endl;
+  std::cout << "  Tx Bytes:   " << flow_stats.txBytes << std::endl;
+  std::cout << "  FCT (timeFirstTx to timeLastRx): " << (flow_stats.timeLastRxPacket.GetSeconds () - flow_stats.timeFirstTxPacket.GetSeconds ()) << " s" << std::endl;
+  std::cout << "  Offered Load: " << flow_stats.txBytes * 8.0 / (flow_stats.timeLastTxPacket.GetSeconds () - flow_stats.timeFirstTxPacket.GetSeconds ()) / 1000000 << " Mbps" << std::endl;
+  std::cout << "  Rx Packets:   " << flow_stats.rxPackets << std::endl;
+  std::cout << "  Rx Bytes:   " << flow_stats.rxBytes << std::endl;
+  
+  std::cout << "  Throughput: " << flow_stats.rxBytes * 8.0 / (flow_stats.timeLastRxPacket.GetSeconds () - flow_stats.timeFirstRxPacket.GetSeconds ()) / 1000000 << " Mbps" << std::endl;
+  std::cout << "  Mean delay:   " << flow_stats.delaySum.GetSeconds () / flow_stats.rxPackets << std::endl;
+  std::cout << "  Mean jitter:   " << flow_stats.jitterSum.GetSeconds () / (flow_stats.rxPackets - 1) << std::endl;
+}
+
+// prints stats for each flow in flows file from IP level (akak FlowMonitor stats)
+// and application level. also prints queue stats for every link in network.
+void ConvergenceExperiments::printExperimentStatsForWorkload() {
+  NS_LOG_FUNCTION (this);
+  mapFlowToFlowMonitorStats();
+
   Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier> (flowmon.GetClassifier ());
   std::map<FlowId, FlowMonitor::FlowStats> stats = monitor->GetFlowStats ();
   std::cout << std::endl << "*** Flow monitor statistics ***" << std::endl;
-
-  for (std::map<FlowId, FlowMonitor::FlowStats>::const_iterator i = stats.begin (); i != stats.end (); ++i) {
-    Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow (i->first);
-    std::cout << "Flow " << i->first - 2 << " (" << t.sourceAddress << " -> " << t.destinationAddress << ")\n";
-    
-    std::cout << "  Tx Packets:   " << i->second.txPackets << std::endl;
-    std::cout << "  Tx Bytes:   " << i->second.txBytes << std::endl;
-    std::cout << "  Offered Load: " << i->second.txBytes * 8.0 / (i->second.timeLastTxPacket.GetSeconds () - i->second.timeFirstTxPacket.GetSeconds ()) / 1000000 << " Mbps" << std::endl;
-    std::cout << "  Rx Packets:   " << i->second.rxPackets << std::endl;
-    std::cout << "  Rx Bytes:   " << i->second.rxBytes << std::endl;
-
-    // This segfaults maybe cuz there's many queue discs, one per node?
-    // std::cout << "  Packets Dropped by Queue Disc:   " << i->second.packetsDropped[Ipv4FlowProbe::DROP_QUEUE_DISC] << std::endl;
-    // std::cout << "  Bytes Dropped by Queue Disc:   " << i->second.bytesDropped[Ipv4FlowProbe::DROP_QUEUE_DISC] << std::endl;
-    // std::cout << "  Packets Dropped by NetDevice:   " << i->second.packetsDropped[Ipv4FlowProbe::DROP_QUEUE] << std::endl;
-    // std::cout << "  Bytes Dropped by NetDevice:   " << i->second.bytesDropped[Ipv4FlowProbe::DROP_QUEUE] << std::endl;
-    std::cout << "  Throughput: " << i->second.rxBytes * 8.0 / (i->second.timeLastRxPacket.GetSeconds () - i->second.timeFirstRxPacket.GetSeconds ()) / 1000000 << " Mbps" << std::endl;
-    std::cout << "  Mean delay:   " << i->second.delaySum.GetSeconds () / i->second.rxPackets << std::endl;
-    std::cout << "  Mean jitter:   " << i->second.jitterSum.GetSeconds () / (i->second.rxPackets - 1) << std::endl;
+  for (uint32_t flow_id = 0; flow_id < all_flows.size(); flow_id++) {
+    if (flowToFlowMonitorIndex.find(flow_id) != flowToFlowMonitorIndex.end()) {
+      const auto& fm_index = flowToFlowMonitorIndex.at(flow_id);
+      NS_ASSERT(stats.find(fm_index) != stats.end());            
+      Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow (fm_index);
+      std::cout << "Flow flow=" << flow_id << "/"
+                << " flowId(FlowMonitor)=" << fm_index << "/"
+                << " sourceAddress=" << t.sourceAddress << "/"
+                << " destinationAddress=" << t.destinationAddress << "/"
+                << " protocol=" << int(t.protocol) << "/"
+                << " sourcePort=" << t.sourcePort << "/"
+                << " destinationPort=" << t.destinationPort << "\n";
+      
+      printSingleFlowStats(stats.at(fm_index));
+    }    
   }
+  
 
   std::cout << std::endl << "*** Application statistics ***" << std::endl;
-  double thr = 0;
-  uint32_t totalPacketsThr = DynamicCast<PacketSink> (sinkApp.Get (0))->GetTotalRx ();
-  thr = totalPacketsThr * 8 / (simulationTime * 1000000.0); //Mbit/s
-  std::cout << "  Rx Bytes: " << totalPacketsThr << std::endl;
-  std::cout << "  Average Goodput: " << thr << " Mbit/s" << std::endl;
+  for (uint32_t i = 0; i < sink_apps.GetN(); i++) {
+    double thr = 0;
+    uint32_t totalPacketsThr = DynamicCast<PacketSink> (sink_apps.Get (i))->GetTotalRx ();
+    thr = totalPacketsThr * 8 / (simulationTime * 1000000.0); //Mbit/s
+    std::cout << "  Sink App " << i << " Rx Bytes: " << totalPacketsThr << std::endl;
+    std::cout << "  Sink App " << i << " Average Goodput: " << thr << " Mbit/s" << std::endl;
+  }
 
+  
   std::cout << std::endl << "*** TC Layer statistics ***" << std::endl;
 
   for (uint32_t  edgedeviceno = 0; edgedeviceno < edgedevices.GetN(); edgedeviceno++) {
@@ -281,9 +383,139 @@ void ConvergenceExperiments::printExperimentStats() {
 
 
 void ConvergenceExperiments::setConfigDefaults() {
+  NS_LOG_FUNCTION (this);
   Config::SetDefault ("ns3::TcpSocket::SegmentSize", UintegerValue (payloadSize));
 }
 
 void ConvergenceExperiments::setupFlowMonitor() {
+  NS_LOG_FUNCTION (this);
   monitor = flowmon.InstallAll();
+}
+
+void ConvergenceExperiments::loadWorkloadFromFiles() {
+  NS_LOG_FUNCTION (this);
+  loadFlowArrivals();
+  loadFlowDepartures();
+  loadEvents();
+  loadAllFlows();
+  loadOptRates();
+  using_files = true;
+}
+
+void ConvergenceExperiments::loadFlowArrivals() {
+  NS_LOG_FUNCTION (this);
+  std::ifstream flow_arrivals_file(flow_arrivals_filename, std::ifstream::in);
+  
+  if (flow_arrivals_file.is_open()) {
+    uint32_t epoch, flow_id;
+    while (flow_arrivals_file >> epoch >> flow_id) {
+      if (epoch > flows_to_start.size()) {
+        flows_to_start.push_back(std::vector<uint32_t>(1, flow_id));
+      } else {
+        flows_to_start.back().push_back(flow_id);
+      }
+    }
+  }
+}
+
+void ConvergenceExperiments::loadFlowDepartures() {
+  NS_LOG_FUNCTION (this);
+  std::ifstream flow_departures_file(flow_departures_filename, std::ifstream::in);
+  if (flow_departures_file.is_open()) {
+    uint32_t epoch, flow_id;
+    while (flow_departures_file >> epoch >> flow_id) {
+      if (epoch > flows_to_stop.size()) {
+        flows_to_stop.push_back(std::vector<uint32_t>(1, flow_id));
+      } else {
+        flows_to_stop.back().push_back(flow_id);
+      }
+    }}
+}
+
+void ConvergenceExperiments::loadEvents() {
+  NS_LOG_FUNCTION (this);
+  const std::string start_str="start_flows";
+  std::ifstream events_file(events_filename, std::ifstream::in);
+  if (events_file.is_open()) {
+    std::string event_type;
+    while(events_file >> event_type) {
+      std::cout << "event type is " << event_type
+                << " and start_str is "  << start_str << "\n";
+      if(event_type.compare(start_str) == 0) {
+        event_list.push_back(true);
+      } else {
+        event_list.push_back(false);
+      }
+    }
+  }
+}
+
+// flows indexed by rank in flows file, this is flow_id
+// must specify source, destination and destination port
+void ConvergenceExperiments::loadAllFlows() {
+  NS_LOG_FUNCTION (this);
+  std::ifstream flows_file(flows_filename, std::ifstream::in);
+  if (flows_file.is_open()) {
+    uint32_t source, destination;
+    uint16_t port;
+    while(flows_file >> source >> destination >> port) {
+      all_flows.push_back(std::make_pair(source, destination));
+      all_flows_port.push_back(port);
+    }
+  }
+}
+
+void ConvergenceExperiments::loadOptRates() {
+  NS_LOG_FUNCTION (this);
+  std::ifstream opt_rates_file(opt_rates_filename, std::ifstream::in);
+  if (opt_rates_file.is_open()) {
+    uint32_t epoch, flow_id;
+    double rate; // Mbps
+    while(opt_rates_file >> epoch >> flow_id >> rate) {
+      opt_rates[epoch][flow_id] = rate;
+    }
+  }
+}
+
+void ConvergenceExperiments::showWorkloadFromFiles() {
+  NS_LOG_FUNCTION (this);
+  std::stringstream out_str;
+  uint32_t next_flows_to_start = 0;
+  uint32_t next_flows_to_stop = 0;
+  uint32_t next_event = 0;
+  uint32_t epoch = next_event+1;
+  while (next_event < event_list.size() && next_event < opt_rates.size()) {    
+    epoch = next_event+1;
+    out_str << "epoch " << epoch << ": ";
+    bool start_flow_next = event_list.front();
+    event_list.pop_front();
+    event_list.push_back(start_flow_next);
+    if (start_flow_next) {
+      out_str << "; start ";
+      for (const auto& flow_id : flows_to_start.at(next_flows_to_start)) {
+        out_str << flow_id
+                << "(" << all_flows.at(flow_id).first
+                << "->" << all_flows.at(flow_id).second
+                << ") ";
+      }
+      next_flows_to_start++;
+    } else {
+      out_str << "; stop ";
+      for (const auto& flow_id : flows_to_start.at(next_flows_to_start)) {
+        out_str << flow_id
+                << "(" << all_flows.at(flow_id).first
+                << "->" << all_flows.at(flow_id).second
+                << ") ";
+      }
+      next_flows_to_stop++;
+    }
+    out_str << "; opt_rates ";
+    const auto& rates = opt_rates.at(next_event+1); 
+    for (const auto& it : rates) {
+      out_str << it.first << ": " << it.second << " Mbps ";
+    }
+    out_str << "\n";
+    next_event++;
+  }
+  std::cout << out_str.str();  
 }
