@@ -7,12 +7,14 @@
 #     conf.check_nonfatal(header_name='stdint.h', define_name='HAVE_STDINT_H')
 
 def build(bld):
-    module = bld.create_ns3_module('perc', ['internet', 'point-to-point', 'applications', 'traffic-control', 'flow-monitor'])
+    module = bld.create_ns3_module('perc', ['internet', 'point-to-point', 'applications', 'traffic-control', 'flow-monitor', 'config-store', 'stats'])
     
     module.source = [
         'model/perc.cc',
         'helper/perc-helper.cc',
         'model/convergence-experiments.cc',
+        'model/sending-application.cc',
+        'helper/sending-helper.cc',
         ]
 
     # module_test = bld.create_ns3_module_test_library('perc')
@@ -26,6 +28,8 @@ def build(bld):
         'model/perc.h',
         'helper/perc-helper.h',
         'model/convergence-experiments.h',
+        'model/sending-application.h',
+        'helper/sending-helper.h',
     ]
 
     if bld.env.ENABLE_EXAMPLES:
