@@ -67,7 +67,7 @@ private:
   // I think startNextEpoch is called every 20ms or as soon as 95% flows
   // have converged.. scheduled form startNextEpoch, canceled and re-scheduled
   // by checkRates
-  void startNextEpoch();
+  void startNextEpoch(bool converged_in_previous);
 
   void checkRates();
 
@@ -81,6 +81,10 @@ private:
   uint32_t next_epoch = 1;
   EventId next_epoch_event;
   EventId check_rates_event;
+  // index into flows to start vector, for next set of flows to
+  // start in whatever epoch
+  uint32_t flows_to_start_next = 0;
+  uint32_t flows_to_stop_next = 0;
   
   // x : in last consecutive x iterations,
   // ninety five percent of flows were within 10 percent
@@ -115,7 +119,7 @@ private:
   // maximum number of iterations of goodness before moving on
   const uint32_t max_iterations_of_goodness = 2500;
   // maximum time before changing epoch
-  Time max_epoch_seconds = Seconds(0.2);
+  Time max_epoch_seconds = Seconds(0.6);
   Time sampling_interval = MicroSeconds(100); // 20us
   
   NodeContainer hosts;  

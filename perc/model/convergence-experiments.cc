@@ -57,7 +57,7 @@ DevicePacketsInQueueTrace (uint32_t oldValue, uint32_t newValue)
 void ConvergenceExperiments::run() {
   NS_LOG_FUNCTION (this);
   createTopology();
-  if (event_list.size() > 0) startNextEpoch();
+  if (event_list.size() > 0) startNextEpoch(false);
   setConfigDefaults();
   setupFlowMonitor();
   
@@ -216,7 +216,7 @@ void ConvergenceExperiments::startApp(uint16_t source_port, uint16_t destination
   SendingHelper sending (socketType, remoteAddress);
   sending.SetAttribute ("MaxBytes", UintegerValue (0)); //10 * payloadSize));
   sending.SetAttribute ("PacketSize", UintegerValue (payloadSize));
-  sending.SetAttribute ("InitialDataRate", StringValue ("1Mbps")); //bit/s
+  sending.SetAttribute ("InitialDataRate", StringValue ("5Mbps")); //bit/s
   sending.SetAttribute ("Local", AddressValue(localAddress)); //bit/s
   //if (hostno == 0)
   //  sending.SetAttribute ("HighPriority", BooleanValue (true)); //bit/s
@@ -230,15 +230,16 @@ void ConvergenceExperiments::startApp(uint16_t source_port, uint16_t destination
 // Gets next event, schedules start or stop flows events and reschedules itself
 // note that checkRates might re-reschedule the next startNextEpoch if flows
 // converge early
-void ConvergenceExperiments::startNextEpoch() {
+void ConvergenceExperiments::startNextEpoch(bool converged_in_previous) {
   NS_LOG_FUNCTION (this);
+  
   // NS_ASSERT(event_list.size() > 0);
   bool start_flows_next = event_list.front();
   event_list.pop_front();
   NS_ASSERT(next_epoch > 0);
   if (start_flows_next) {
     // vector, indexing start at 0
-    const auto& flows = flows_to_start.at(next_epoch-1);    
+    const auto& flows = flows_to_start.at(flows_to_start_next++);    
     for (const auto& f : flows) {
       uint32_t source = all_flows.at(f).first;
       uint32_t destination = all_flows.at(f).second;
@@ -262,27 +263,32 @@ void ConvergenceExperiments::startNextEpoch() {
       fiveTupleToFlow[t] = f;
       flowToFiveTuple[f] = t;
       active_flows.insert(f);
+      std::cout << "inserted flow " << f << " in active_flows.\n";
       // NS_ASSERT(sending_apps.GetN() == sink_apps.GetN())
     }
   } else {
     // vector, indexing start at 0
-    const auto& flows = flows_to_stop.at(next_epoch-1);
+    const auto& flows = flows_to_stop.at(flows_to_stop_next++);
     for (const auto& f : flows) {
       stopApp(f);
       NS_ASSERT(active_flows.find(f) != active_flows.end());
       active_flows.erase(f);
+      std::cout << "removed flow " << f << " from active_flows.\n";
     }    
   }
   last_epoch_time = Simulator::Now(); // TODO(lav): not used?
   
   if (event_list.size() > 0) {
+    std::cout << "scheduling next_epoch_event from startNextEpoch in " << max_epoch_seconds.GetSeconds() << "s.\n";
     next_epoch_event = Simulator::Schedule(max_epoch_seconds,
-                                           &ConvergenceExperiments::startNextEpoch, this);
+                                           &ConvergenceExperiments::startNextEpoch, this, false);
   }
   // increment next_epoch since we just added/ removed flows
   // for a new epoch
   
   next_epoch++;
+  std::cout << "next_epoch is now " << next_epoch << (converged_in_previous ? ", didn't converge" : ", converged")
+            << " in previous epoch. \n";
    // else {
   //   Simulator::Stop();
   // }
@@ -302,8 +308,8 @@ void ConvergenceExperiments::startNextEpoch() {
 // similar to xfabric's CheckIpv4 rates except we iterate
 // through FlowMonitor's flows
 void ConvergenceExperiments::checkRates() {
-  std::cout << Simulator::Now().GetSeconds()
-            << " in checkRates\n";
+  // std::cout << Simulator::Now().GetSeconds()
+  //           << " in checkRates\n";
   
   double current_total_rate = 0.0;
   std::vector<double> small_errors;
@@ -314,7 +320,7 @@ void ConvergenceExperiments::checkRates() {
   // std::map<FlowId, FlowMonitor::FlowStats> stats =
   //   monitor->GetFlowStats ();
 
-  std::cout << std::endl << "*** Flow monitor statistics ***" << std::endl;
+  //  std::cout << std::endl << "*** Flow monitor statistics ***" << std::endl;
   for (const auto& flow_id : active_flows) {
     FlowId fm_index;// = ((FlowId) flow_id+1);
         bool found = false;
@@ -336,10 +342,17 @@ void ConvergenceExperiments::checkRates() {
     //NS_ASSERT(stats.find(fm_index) != stats.end());
     //const FlowMonitor::FlowStats& flow_stats = stats.at(fm_index);
     // Mb/s
-    double optimal_rate = opt_rates.at(next_epoch-1).at(flow_id);
+    //std::cout << "Finding rates for flow " << flow_id << " in epoch " << next_epoch-1 << std::endl;
+    double optimal_rate = 0;
+    auto const& opt_it = opt_rates.at(next_epoch-1).find(flow_id);
+    if (opt_it != opt_rates.at(next_epoch-1).end())
+      optimal_rate = opt_it->second;
     double stats_rate = monitor->getEwmaRate(fm_index);
     double measured_rate = stats_rate / 1000000.0;
     double error = abs(optimal_rate - measured_rate);
+
+    // std::cout << "Flow " << flow_id << " has measured rate " << measured_rate << " Mbps"
+    //           << " and expected rate " << optimal_rate << " Mbps.\n";
     NS_ASSERT(optimal_rate > 0);
     if (error < 0.1 * optimal_rate) small_errors.push_back(error);
     else  other_errors.push_back(error);
@@ -354,6 +367,7 @@ void ConvergenceExperiments::checkRates() {
   }
 
   if (ninety_fifth_converged > max_iterations_of_goodness) {
+    ninety_fifth_converged = 0;
     if (next_epoch_event.IsRunning()) {
       std::cout << "Next epoch event is running, cancel.\n";
       next_epoch_event.Cancel();
@@ -361,17 +375,20 @@ void ConvergenceExperiments::checkRates() {
 
     // start next epoch i.e., add/ remove more flows
     if (event_list.size() > 0) {
-      next_epoch_event = Simulator::Schedule(max_epoch_seconds,
-                                             &ConvergenceExperiments::startNextEpoch, this);
-      next_epoch++;
+      // should be in 0 seconds
+      std::cout << "We saw " << max_iterations_of_goodness
+                << " iterations of goodness, scheduling next epoch event from checkRate in " << 0 << "s.\n";;
+      next_epoch_event = Simulator::Schedule(Seconds(0),
+                                             &ConvergenceExperiments::startNextEpoch, this, true);
+      // next_epoch++;
     } else {
       std::cout << "Stopping simulations after " << max_iterations_of_goodness << " iterations of goodness.\n";
       Simulator::Stop();
     }
   }
 
-  std::cout << Simulator::Now().GetSeconds() << "s Total: "
-            << current_total_rate << " Mbps.\n";
+  // std::cout << Simulator::Now().GetSeconds() << "s Total: "
+  //           << current_total_rate << " Mbps.\n";
    check_rates_event =
      Simulator::Schedule(
                          sampling_interval,
@@ -538,14 +555,17 @@ void ConvergenceExperiments::loadFlowArrivals() {
 void ConvergenceExperiments::loadFlowDepartures() {
   NS_LOG_FUNCTION (this);
   std::ifstream flow_departures_file(flow_departures_filename, std::ifstream::in);
+  uint32_t last_epoch = 0;
   if (flow_departures_file.is_open()) {
     uint32_t epoch, flow_id;
     while (flow_departures_file >> epoch >> flow_id) {
-      if (epoch > flows_to_stop.size()) {
-        flows_to_stop.push_back(std::vector<uint32_t>(1, flow_id));
-      } else {
-        flows_to_stop.back().push_back(flow_id);
+      // epoch must start from 1
+      if (epoch > last_epoch) {
+        // epoch 1 X means flows_to_stop should have size 1
+        flows_to_stop.push_back(std::vector<uint32_t>());
+        last_epoch = epoch;
       }
+      flows_to_stop.back().push_back(flow_id);
     }}
 }
 
@@ -619,7 +639,7 @@ void ConvergenceExperiments::showWorkloadFromFiles() {
       next_flows_to_start++;
     } else {
       out_str << "; stop ";
-      for (const auto& flow_id : flows_to_start.at(next_flows_to_start)) {
+      for (const auto& flow_id : flows_to_stop.at(next_flows_to_stop)) {
         out_str << flow_id
                 << "(" << all_flows.at(flow_id).first
                 << "->" << all_flows.at(flow_id).second
