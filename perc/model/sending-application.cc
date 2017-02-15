@@ -55,7 +55,7 @@ SendingApplication::GetTypeId (void)
   static TypeId tid = TypeId ("ns3::SendingApplication")
     .SetParent<Application> ()
     .SetGroupName("Applications")
-    .AddConstructor<SendingApplication> ()
+    .AddConstructor<SendingApplication> ()    
     .AddAttribute ("InitialDataRate", "The data rate in on state.",
                    DataRateValue (DataRate ("500kb/s")),
                    MakeDataRateAccessor (&SendingApplication::m_dataRate),
@@ -64,6 +64,11 @@ SendingApplication::GetTypeId (void)
                    UintegerValue (512),
                    MakeUintegerAccessor (&SendingApplication::m_pktSize),
                    MakeUintegerChecker<uint32_t> (1))
+    .AddAttribute ("Local",
+                   "The Address on which to Bind the tx socket.",
+                   AddressValue (),
+                   MakeAddressAccessor (&SendingApplication::m_local),
+                   MakeAddressChecker ())
     .AddAttribute ("Remote", "The address of the destination",
                    AddressValue (),
                    MakeAddressAccessor (&SendingApplication::m_peer),
@@ -168,7 +173,10 @@ void SendingApplication::StartApplication () // Called at time specified by Star
       else if (InetSocketAddress::IsMatchingType (m_peer) ||
                PacketSocketAddress::IsMatchingType (m_peer))
         {
-          m_socket->Bind ();
+          if (!m_local.IsInvalid())
+            m_socket->Bind (m_local);
+          else
+            m_socket->Bind();
         }
       m_socket->Connect (m_peer);
       // TCP Bind and Connect overwrite IpTos ?? http://www.mehic.info/2016/11/socketsetiptos-in-ns-3-ver-3-26/

@@ -30,6 +30,8 @@
 #include "ns3/traffic-control-module.h"
 #include "ns3/flow-monitor-module.h"
 
+#include <unordered_set>
+
 using namespace ns3;
 
 class ConvergenceExperiments {
@@ -56,8 +58,10 @@ private:
   void setupFlowMonitor();
   void setConfigDefaults();
 
-  void startApp(uint16_t port, uint32_t source_host,
-                uint32_t destination_host, Time start_time);
+  void startApp(uint16_t source_port, uint16_t destination_port,
+                uint32_t source_host, uint32_t destination_host,
+                Time start_time);
+
   void stopApp(uint32_t flow_id);
 
   // I think startNextEpoch is called every 20ms or as soon as 95% flows
@@ -65,15 +69,23 @@ private:
   // by checkRates
   void startNextEpoch();
 
+  void checkRates();
+
   // fills in flowToFlowId (so we can get correct FlowMonitor stats for each flow)
   // only uses source, destination IP address and destination port
-  void mapFlowToFlowMonitorStats();
+  // void mapFlowToFlowMonitorStats();
   void printExperimentStatsForWorkload();
   void printSingleFlowStats(const FlowMonitor::FlowStats& flow_stats);
 
   Time last_epoch_time; // time when startNextEpoch was last called
   uint32_t next_epoch = 1;
   EventId next_epoch_event;
+  EventId check_rates_event;
+  
+  // x : in last consecutive x iterations,
+  // ninety five percent of flows were within 10 percent
+  // of optimal rate for current epoch  
+  uint32_t ninety_fifth_converged = 0;
   
   std::string flow_arrivals_filename; // epoch flow_index
   std::string flow_departures_filename; // epoch flow_index
@@ -86,15 +98,25 @@ private:
   std::list<bool> event_list; // true: start flows
   
   std::vector<std::pair<uint32_t, uint32_t> > all_flows; // source, destination
-  std::vector<uint16_t> all_flows_port; // TODO(lav): maybe merge with ^
+  std::vector<std::pair<uint16_t, uint32_t> > all_flows_ports; // TODO(lav): maybe merge with ^
 
   std::map<uint32_t, std::map<uint32_t, double> > opt_rates; // indexed by epoch
+
+  // set of active flows for this epoch, updated in startNextEpoch
+  // active flows here means, flows added in/before current epoch
+  // and not removed until next epoch or after.
+  // used when checking rates
+  std::unordered_set<uint32_t> active_flows;
   
   bool using_files = false; // true if we load workload from files
 
   double simulationTime = 10; //seconds
   uint32_t payloadSize = 1448;
+  // maximum number of iterations of goodness before moving on
+  const uint32_t max_iterations_of_goodness = 2500;
+  // maximum time before changing epoch
   Time max_epoch_seconds = Seconds(0.2);
+  Time sampling_interval = MicroSeconds(100); // 20us
   
   NodeContainer hosts;  
   NodeContainer leafnodes;
@@ -109,6 +131,7 @@ private:
   ApplicationContainer sending_apps;
   std::map<uint32_t, uint32_t> flowToAppIndex;
   std::map<Ipv4FlowClassifier::FiveTuple, uint32_t> fiveTupleToFlow;
+  std::map<uint32_t, Ipv4FlowClassifier::FiveTuple> flowToFiveTuple;
   
   // flow monitor indexes all observed flows by a "FlowId", different from index of flow in flows file
   // currently this is populated at the end, but maybe want to update it each time flow monitor adds a new flow

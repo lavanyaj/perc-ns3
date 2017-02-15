@@ -145,6 +145,7 @@ private:
   void SendPacket ();
 
   Ptr<Socket>     m_socket;       //!< Associated socket
+  Address         m_local;        //!< Local address
   Address         m_peer;         //!< Peer address
   bool            m_connected;    //!< True if connected
   uint32_t        m_pktSize;      //!< Size of packets

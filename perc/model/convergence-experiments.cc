@@ -25,6 +25,7 @@
 #include <utility> // pair
 #include <vector>
 #include <list>
+#include <unordered_set>
 
 #include "ns3/core-module.h"
 #include "ns3/network-module.h"
@@ -195,10 +196,11 @@ void ConvergenceExperiments::stopApp(uint32_t flow_id) {
 }
 
 // will add a new app/ sink app for given flow info
-void ConvergenceExperiments::startApp(uint16_t port, uint32_t source_host, uint32_t destination_host, Time start_time) {
-  NS_LOG_FUNCTION (this << port << source_host << destination_host << start_time);
+void ConvergenceExperiments::startApp(uint16_t source_port, uint16_t destination_port,
+                                      uint32_t source_host, uint32_t destination_host, Time start_time) {
+  NS_LOG_FUNCTION (this << source_port << destination_port << source_host << destination_host << start_time);
   // Install packet sink at destination host    
-  Address localAddress (InetSocketAddress (Ipv4Address::GetAny (), port));
+  Address localAddress (InetSocketAddress (Ipv4Address::GetAny (), destination_port));
   PacketSinkHelper packetSinkHelper (socketType, localAddress);
 
   // apparently packetSinkHelper.Install returns ApplicationContainer
@@ -207,12 +209,15 @@ void ConvergenceExperiments::startApp(uint16_t port, uint32_t source_host, uint3
   sink_app.Start(start_time);
 
   // Install packet generator at all other hosts
-  AddressValue remoteAddress (InetSocketAddress (interfaces.GetAddress (destination_host*2), port));
+  AddressValue remoteAddress (InetSocketAddress (interfaces.GetAddress (destination_host*2), destination_port));
+
+  localAddress =  Address(InetSocketAddress (interfaces.GetAddress (source_host*2), source_port));
 
   SendingHelper sending (socketType, remoteAddress);
   sending.SetAttribute ("MaxBytes", UintegerValue (0)); //10 * payloadSize));
   sending.SetAttribute ("PacketSize", UintegerValue (payloadSize));
   sending.SetAttribute ("InitialDataRate", StringValue ("1Mbps")); //bit/s
+  sending.SetAttribute ("Local", AddressValue(localAddress)); //bit/s
   //if (hostno == 0)
   //  sending.SetAttribute ("HighPriority", BooleanValue (true)); //bit/s
   // Remote attribute bound to m_peer, used when creating socket
@@ -237,23 +242,26 @@ void ConvergenceExperiments::startNextEpoch() {
     for (const auto& f : flows) {
       uint32_t source = all_flows.at(f).first;
       uint32_t destination = all_flows.at(f).second;
-      uint16_t port = all_flows_port.at(f);
+      uint16_t source_port = all_flows_ports.at(f).first;
+      uint16_t destination_port = all_flows_ports.at(f).second;
       // for logging
       Ipv4Address source_address = interfaces.GetAddress(source*2);
       Ipv4Address destination_address = interfaces.GetAddress(destination*2);
       Ipv4FlowClassifier::FiveTuple t =
-        { source_address, destination_address, 0, 0, port};
+        { source_address, destination_address, 6, source_port, destination_port};
       std::cout << "Starting flow # " << f << ": "
                 << " sourceAddress=" << t.sourceAddress << "/"
                 << " destinationAddress=" << t.destinationAddress << "/"
-                << " protocol=?/"
-                << " sourcePort=?/"
+                << " protocol=" << t.protocol << "/"
+                << " sourcePort=" << t.sourcePort << "/"
                 << " destinationPort=" << t.destinationPort
                 << " at time " << Simulator::Now() << "\n";
-      startApp(port, source, destination, Simulator::Now());
+      startApp(source_port, destination_port, source, destination, Simulator::Now());
       // NS_ASSERT(flowToAppIndex.find(f) == flowToAppIndex::end)
       flowToAppIndex[f] = sending_apps.GetN()-1;      
       fiveTupleToFlow[t] = f;
+      flowToFiveTuple[f] = t;
+      active_flows.insert(f);
       // NS_ASSERT(sending_apps.GetN() == sink_apps.GetN())
     }
   } else {
@@ -261,51 +269,147 @@ void ConvergenceExperiments::startNextEpoch() {
     const auto& flows = flows_to_stop.at(next_epoch-1);
     for (const auto& f : flows) {
       stopApp(f);
+      NS_ASSERT(active_flows.find(f) != active_flows.end());
+      active_flows.erase(f);
     }    
   }
   last_epoch_time = Simulator::Now(); // TODO(lav): not used?
-
+  
   if (event_list.size() > 0) {
     next_epoch_event = Simulator::Schedule(max_epoch_seconds,
                                            &ConvergenceExperiments::startNextEpoch, this);
-    next_epoch++;
-  } else {
-    Simulator::Stop();
   }
+  // increment next_epoch since we just added/ removed flows
+  // for a new epoch
   
+  next_epoch++;
+   // else {
+  //   Simulator::Stop();
+  // }
+
+  // start checking rates right after adding (check) flows
+  // in first epoch
+  if (true and next_epoch == 2) {
+    std::cout << "scheduling checkRates.\n";
+    check_rates_event =
+      Simulator::Schedule(
+                          sampling_interval,
+                          &ConvergenceExperiments::checkRates, this);
+  }
+
+}
+
+// similar to xfabric's CheckIpv4 rates except we iterate
+// through FlowMonitor's flows
+void ConvergenceExperiments::checkRates() {
+  std::cout << Simulator::Now().GetSeconds()
+            << " in checkRates\n";
+  
+  double current_total_rate = 0.0;
+  std::vector<double> small_errors;
+  std::vector<double> other_errors;
+
+  Ptr<Ipv4FlowClassifier> classifier =
+   DynamicCast<Ipv4FlowClassifier> (flowmon.GetClassifier ());
+  // std::map<FlowId, FlowMonitor::FlowStats> stats =
+  //   monitor->GetFlowStats ();
+
+  std::cout << std::endl << "*** Flow monitor statistics ***" << std::endl;
+  for (const auto& flow_id : active_flows) {
+    FlowId fm_index;// = ((FlowId) flow_id+1);
+        bool found = false;
+    if (flowToFlowMonitorIndex.find(flow_id)
+        != flowToFlowMonitorIndex.end()) {
+      fm_index = flowToFlowMonitorIndex.at(flow_id);
+      found = true;
+    } else if (flowToFiveTuple.find(flow_id)
+               != flowToFiveTuple.end()
+               and classifier->FindFlowId(flowToFiveTuple.at(flow_id), fm_index)) {
+      const auto ret =
+        flowToFlowMonitorIndex.insert(
+              std::make_pair(flow_id, fm_index));
+      NS_ASSERT(ret.second);
+      found = true;
+    }
+    if (!found) continue;
+    //std::cout << "found flow " << flow_id << " in flow monitor\n";
+    //NS_ASSERT(stats.find(fm_index) != stats.end());
+    //const FlowMonitor::FlowStats& flow_stats = stats.at(fm_index);
+    // Mb/s
+    double optimal_rate = opt_rates.at(next_epoch-1).at(flow_id);
+    double stats_rate = monitor->getEwmaRate(fm_index);
+    double measured_rate = stats_rate / 1000000.0;
+    double error = abs(optimal_rate - measured_rate);
+    NS_ASSERT(optimal_rate > 0);
+    if (error < 0.1 * optimal_rate) small_errors.push_back(error);
+    else  other_errors.push_back(error);
+    
+    current_total_rate += measured_rate;    
+  }
+  uint32_t total_flows = small_errors.size()+other_errors.size();
+  if (small_errors.size() >= 0.95 * total_flows) {
+    ninety_fifth_converged++;
+  } else {
+    ninety_fifth_converged = 0;
+  }
+
+  if (ninety_fifth_converged > max_iterations_of_goodness) {
+    if (next_epoch_event.IsRunning()) {
+      std::cout << "Next epoch event is running, cancel.\n";
+      next_epoch_event.Cancel();
+    }
+
+    // start next epoch i.e., add/ remove more flows
+    if (event_list.size() > 0) {
+      next_epoch_event = Simulator::Schedule(max_epoch_seconds,
+                                             &ConvergenceExperiments::startNextEpoch, this);
+      next_epoch++;
+    } else {
+      std::cout << "Stopping simulations after " << max_iterations_of_goodness << " iterations of goodness.\n";
+      Simulator::Stop();
+    }
+  }
+
+  std::cout << Simulator::Now().GetSeconds() << "s Total: "
+            << current_total_rate << " Mbps.\n";
+   check_rates_event =
+     Simulator::Schedule(
+                         sampling_interval,
+                         &ConvergenceExperiments::checkRates,
+                         this);
 }
 
 // fills in flowToFlowId (so we can get correct FlowMonitor stats for each flow)
 // only uses source, destination IP address and destination port
-void ConvergenceExperiments::mapFlowToFlowMonitorStats() {
-  Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier> (flowmon.GetClassifier ());
-  std::map<FlowId, FlowMonitor::FlowStats> stats = monitor->GetFlowStats ();
-  for (const auto& fm_iter : stats) {
-    Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow (fm_iter.first);
-    bool found = false;
-    for (const auto& iter : fiveTupleToFlow) {
-      if (iter.first.sourceAddress == t.sourceAddress &&
-          iter.first.destinationAddress == t.destinationAddress &&
-          iter.first.destinationPort == t.destinationPort) {
-        flowToFlowMonitorIndex[iter.second] = fm_iter.first;
-        found = true;
-      } else if (iter.first.destinationAddress == t.sourceAddress &&
-          iter.first.sourceAddress == t.destinationAddress &&
-          iter.first.destinationPort == t.sourcePort) {
-        found = true; // found FlowMonitor flow for ACK
-      }
-    }
-    if (!found) {
-      std::cout << "didn't find flow_id for stats for "
-                << " flowId(FlowMonitor)=" << fm_iter.first << "/"
-                << " sourceAddress=" << t.sourceAddress << "/"
-                << " destinationAddress=" << t.destinationAddress << "/"
-                << " protocol=" << int(t.protocol) << "/"
-                << " sourcePort=" << t.sourcePort << "/"
-                << " destinationPort=" << t.destinationPort << "\n";
-    }
-  }
-}
+// void ConvergenceExperiments::mapFlowToFlowMonitorStats() {
+//   Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier> (flowmon.GetClassifier ());
+//   std::map<FlowId, FlowMonitor::FlowStats> stats = monitor->GetFlowStats ();
+//   for (const auto& fm_iter : stats) {
+//     Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow (fm_iter.first);
+//     bool found = false;
+//     for (const auto& iter : fiveTupleToFlow) {
+//       if (iter.first.sourceAddress == t.sourceAddress &&
+//           iter.first.destinationAddress == t.destinationAddress &&
+//           iter.first.destinationPort == t.destinationPort) {
+//         flowToFlowMonitorIndex[iter.second] = fm_iter.first;
+//         found = true;
+//       } else if (iter.first.destinationAddress == t.sourceAddress &&
+//           iter.first.sourceAddress == t.destinationAddress &&
+//           iter.first.destinationPort == t.sourcePort) {
+//         found = true; // found FlowMonitor flow for ACK
+//       }
+//     }
+//     if (!found) {
+//       std::cout << "didn't find flow_id for stats for "
+//                 << " flowId(FlowMonitor)=" << fm_iter.first << "/"
+//                 << " sourceAddress=" << t.sourceAddress << "/"
+//                 << " destinationAddress=" << t.destinationAddress << "/"
+//                 << " protocol=" << int(t.protocol) << "/"
+//                 << " sourcePort=" << t.sourcePort << "/"
+//                 << " destinationPort=" << t.destinationPort << "\n";
+//     }
+//   }
+// }
 
 
 void ConvergenceExperiments::printSingleFlowStats(const FlowMonitor::FlowStats& flow_stats) {
@@ -317,6 +421,7 @@ void ConvergenceExperiments::printSingleFlowStats(const FlowMonitor::FlowStats& 
   std::cout << "  Rx Bytes:   " << flow_stats.rxBytes << std::endl;
   
   std::cout << "  Throughput: " << flow_stats.rxBytes * 8.0 / (flow_stats.timeLastRxPacket.GetSeconds () - flow_stats.timeFirstRxPacket.GetSeconds ()) / 1000000 << " Mbps" << std::endl;
+  std::cout << "  EWMA rate of packets at receiver: " << flow_stats.rxEwmaRate / 1000000 << " Mbps" << std::endl;
   std::cout << "  Mean delay:   " << flow_stats.delaySum.GetSeconds () / flow_stats.rxPackets << std::endl;
   std::cout << "  Mean jitter:   " << flow_stats.jitterSum.GetSeconds () / (flow_stats.rxPackets - 1) << std::endl;
 }
@@ -325,26 +430,38 @@ void ConvergenceExperiments::printSingleFlowStats(const FlowMonitor::FlowStats& 
 // and application level. also prints queue stats for every link in network.
 void ConvergenceExperiments::printExperimentStatsForWorkload() {
   NS_LOG_FUNCTION (this);
-  mapFlowToFlowMonitorStats();
+  //mapFlowToFlowMonitorStats();
 
   Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier> (flowmon.GetClassifier ());
   std::map<FlowId, FlowMonitor::FlowStats> stats = monitor->GetFlowStats ();
   std::cout << std::endl << "*** Flow monitor statistics ***" << std::endl;
   for (uint32_t flow_id = 0; flow_id < all_flows.size(); flow_id++) {
+    FlowId fm_index;
+    bool found = false;
     if (flowToFlowMonitorIndex.find(flow_id) != flowToFlowMonitorIndex.end()) {
-      const auto& fm_index = flowToFlowMonitorIndex.at(flow_id);
-      NS_ASSERT(stats.find(fm_index) != stats.end());            
-      Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow (fm_index);
-      std::cout << "Flow flow=" << flow_id << "/"
-                << " flowId(FlowMonitor)=" << fm_index << "/"
-                << " sourceAddress=" << t.sourceAddress << "/"
-                << " destinationAddress=" << t.destinationAddress << "/"
-                << " protocol=" << int(t.protocol) << "/"
-                << " sourcePort=" << t.sourcePort << "/"
-                << " destinationPort=" << t.destinationPort << "\n";
+      fm_index = flowToFlowMonitorIndex.at(flow_id);
+      found = true;
+    } else if (flowToFiveTuple.find(flow_id) != flowToFiveTuple.end()
+               and classifier->FindFlowId(flowToFiveTuple.at(flow_id), fm_index)) {
+      const auto ret = flowToFlowMonitorIndex.insert(std::make_pair(flow_id, fm_index));
+      NS_ASSERT(ret.second);
+      found = true;
+    }
       
-      printSingleFlowStats(stats.at(fm_index));
-    }    
+    if (found) {
+        NS_ASSERT(stats.find(fm_index) != stats.end());
+        
+        std::cout << "Flow flow=" << flow_id << "/"
+                  << " flowId(FlowMonitor)=" << fm_index <<"\n";
+                  // << "/"
+                  // << " sourceAddress=" << t.sourceAddress << "/"
+                  // << " destinationAddress=" << t.destinationAddress << "/"
+                  // << " protocol=" << int(t.protocol) << "/"
+                  // << " sourcePort=" << t.sourcePort << "/"
+                  // << " destinationPort=" << t.destinationPort << "\n";
+      
+        printSingleFlowStats(stats.at(fm_index));
+    }
   }
   
 
@@ -457,17 +574,18 @@ void ConvergenceExperiments::loadAllFlows() {
   std::ifstream flows_file(flows_filename, std::ifstream::in);
   if (flows_file.is_open()) {
     uint32_t source, destination;
-    uint16_t port;
-    while(flows_file >> source >> destination >> port) {
+    uint16_t source_port, destination_port;
+    while(flows_file >> source >> source_port >> destination >> destination_port) {
       all_flows.push_back(std::make_pair(source, destination));
-      all_flows_port.push_back(port);
+      all_flows_ports.push_back(std::make_pair(source_port, destination_port));
     }
   }
 }
 
 void ConvergenceExperiments::loadOptRates() {
   NS_LOG_FUNCTION (this);
-  std::ifstream opt_rates_file(opt_rates_filename, std::ifstream::in);
+  std::ifstream opt_rates_file(opt_rates_filename,
+                               std::ifstream::in);
   if (opt_rates_file.is_open()) {
     uint32_t epoch, flow_id;
     double rate; // Mbps
@@ -509,7 +627,7 @@ void ConvergenceExperiments::showWorkloadFromFiles() {
       }
       next_flows_to_stop++;
     }
-    out_str << "; opt_rates ";
+    out_str << "; opt_rates (epoch " << next_event+1 << ") ";
     const auto& rates = opt_rates.at(next_event+1); 
     for (const auto& it : rates) {
       out_str << it.first << ": " << it.second << " Mbps ";
