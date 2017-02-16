@@ -54,7 +54,8 @@ private:
   void loadOptRates();
   void showWorkloadFromFiles();
 
-  void createTopology();  
+  void createTopology1();
+  void createTopology2();  
   void setupFlowMonitor();
   void setConfigDefaults();
 
@@ -114,19 +115,32 @@ private:
   
   bool using_files = false; // true if we load workload from files
 
+  // Constants
   double simulationTime = 10; //seconds
   uint32_t payloadSize = 1448;
   // maximum number of iterations of goodness before moving on
   const uint32_t max_iterations_of_goodness = 2500;
   // maximum time before changing epoch
-  Time max_epoch_seconds = Seconds(0.6);
+  Time max_epoch_seconds = Seconds(5);
   Time sampling_interval = MicroSeconds(100); // 20us
-  
+  const std::string topology1_edgep2p_datarate = "10Mbps";
+  const std::string topology1_edgep2p_delay = "2ms";
+  const std::string topology1_tch_queuedisc = "ns3::PfifoFastQueueDisc";
+
+  const std::string topology2_edgep2p_datarate = "10Gbps";
+  const std::string topology2_edgep2p_delay = "10us";
+  const std::string topology2_fabricp2p_datarate = "40Gbps";
+  const std::string topology2_fabricp2p_delay = "10us";
+  const std::string topology2_tch_queuedisc = "ns3::PfifoFastQueueDisc";
+
   NodeContainer hosts;  
   NodeContainer leafnodes;
+  NodeContainer spinenodes; // only used in topology2
   std::string transportProt = "Tcp";
-  std::string socketType;
+  std::string socketType = "ns3::TcpSocketFactory";
   NetDeviceContainer edgedevices;
+  NetDeviceContainer fabricdevices; // only used in topology2
+  NetDeviceContainer alldevices; // only used in topology2
   Ipv4InterfaceContainer interfaces;
   QueueDiscContainer qdiscs;
 

@@ -53,11 +53,11 @@ main (int argc, char *argv[])
 {
   
   //ConvergenceExperiments exp;
-  ConvergenceExperiments exp("src/perc/examples/flow_arrivals_1.txt",
-                         "src/perc/examples/flow_departures_1.txt",
-                         "src/perc/examples/events_1.txt",
-                         "src/perc/examples/flows_1.txt",
-                         "src/perc/examples/opt_rates_1.txt");
+  ConvergenceExperiments exp("src/perc/examples/workload2/flow_arrivals.txt",
+                         "src/perc/examples/workload2/flow_departures.txt",
+                         "src/perc/examples/workload2/events.txt",
+                         "src/perc/examples/workload2/flows.txt",
+                         "src/perc/examples/workload2/opt_rates.txt");
 
   exp.parseCmdConfig(argc, argv);
   exp.run();

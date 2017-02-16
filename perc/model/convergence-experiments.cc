@@ -56,7 +56,7 @@ DevicePacketsInQueueTrace (uint32_t oldValue, uint32_t newValue)
 
 void ConvergenceExperiments::run() {
   NS_LOG_FUNCTION (this);
-  createTopology();
+  createTopology2();
   if (event_list.size() > 0) startNextEpoch(false);
   setConfigDefaults();
   setupFlowMonitor();
@@ -91,22 +91,17 @@ ConvergenceExperiments::ConvergenceExperiments(
   showWorkloadFromFiles();
 }
 
-void ConvergenceExperiments::createTopology() {
+void ConvergenceExperiments::createTopology1() {
   NS_LOG_FUNCTION (this);
-  if (transportProt.compare ("Tcp") == 0)
-    {
-      socketType = "ns3::TcpSocketFactory";
-    }
-  else
-    {
-      socketType = "ns3::UdpSocketFactory";
-    }
   hosts.Create (4);
   leafnodes.Create (1);
   
   PointToPointHelper edgep2p;
-  edgep2p.SetDeviceAttribute ("DataRate", StringValue ("10Mbps"));
-  edgep2p.SetChannelAttribute ("Delay", StringValue ("2ms"));
+  edgep2p.SetDeviceAttribute ("DataRate",
+                StringValue (topology1_edgep2p_datarate));
+
+  edgep2p.SetChannelAttribute ("Delay",
+                StringValue (topology1_edgep2p_delay));
   edgep2p.SetQueue ("ns3::DropTailQueue", "Mode", StringValue ("QUEUE_MODE_PACKETS"), "MaxPackets", UintegerValue (1));
 
   for (uint32_t hostno = 0; hostno < hosts.GetN(); hostno++) {
@@ -140,7 +135,7 @@ void ConvergenceExperiments::createTopology() {
   
   // config down link queues for each link?
   TrafficControlHelper tch;
-  tch.SetRootQueueDisc ("ns3::PfifoFastQueueDisc");
+  tch.SetRootQueueDisc (topology1_tch_queuedisc);
   qdiscs = tch.Install (edgedevices);
   // can also uninstall after assigning IP address, see traffic-control.cc.1
   
@@ -170,14 +165,137 @@ void ConvergenceExperiments::createTopology() {
   for (uint32_t edgedeviceno = 0; edgedeviceno < edgedevices.GetN(); edgedeviceno++) {
     // link l has base 10.1.l.0, copying Kanthi's format
     Ipv4AddressHelper address;
-    std::ostringstream subnet; subnet << "10.1."<<edgedeviceno<<".0";
+    std::ostringstream subnet;
+    subnet << "10.1."<<edgedeviceno<<".0";
+    
     address.SetBase (subnet.str().c_str(), "255.255.255.0");
-    // assign returns two interface addrs for
+    // assign returns two interface addrs (this applies to edge links)
     //  the net device from host to leaf
     //  and the netdevice from leaf to host
     //  NOTE!! Ipv4 address of NIC at host h = interfaces.GetAddress(host*2);
     //  TODO(lav): make function to get this, since it depends on topology setup
     interfaces.Add(address.Assign (edgedevices.Get(edgedeviceno)));
+  }
+  //tch.Uninstall (tordowns);
+  // Turn on global static routing, copying from K
+  Ipv4GlobalRoutingHelper::PopulateRoutingTables ();
+}
+
+
+void ConvergenceExperiments::createTopology2() {
+  NS_LOG_FUNCTION (this);
+  hosts.Create (16*9);
+  leafnodes.Create (9);
+  spinenodes.Create (4);
+
+  PointToPointHelper edgep2p;
+  edgep2p.SetDeviceAttribute ("DataRate",
+                StringValue (topology2_edgep2p_datarate));
+  edgep2p.SetChannelAttribute ("Delay",
+                StringValue (topology2_edgep2p_delay));
+  edgep2p.SetQueue ("ns3::DropTailQueue", "Mode", StringValue ("QUEUE_MODE_PACKETS"), "MaxPackets", UintegerValue (1));
+
+  PointToPointHelper fabricp2p;
+  fabricp2p.SetDeviceAttribute ("DataRate",
+                StringValue (topology2_fabricp2p_datarate));
+  fabricp2p.SetChannelAttribute ("Delay",
+                StringValue (topology2_fabricp2p_delay));
+  fabricp2p.SetQueue ("ns3::DropTailQueue", "Mode", StringValue ("QUEUE_MODE_PACKETS"), "MaxPackets", UintegerValue (1));
+  
+  for (uint32_t leafno = 0; leafno < leafnodes.GetN(); leafno++) {
+    // each leaf node connected to all spine nodes
+   for (uint32_t spineno = 0; spineno < spinenodes.GetN(); spineno++) {
+     fabricdevices.Add(fabricp2p.Install (leafnodes.Get(leafno),
+                                          spinenodes.Get(spineno)));
+   }
+  }
+  
+  for (uint32_t hostno = 0; hostno < hosts.GetN(); hostno++) {
+    // each host node connected to exactly one leaf node, given by
+    uint32_t leafno = hostno / 16;
+    // install will return a container comprising
+    // 1) the net device installed at host towards leafnode !! So edgedevices.Get(l).Get(0) to get NIC
+    // 2) the net device installed at leafnode towards host
+    edgedevices.Add(edgep2p.Install (hosts.Get(hostno), leafnodes.Get(leafno)));
+  }
+
+  alldevices.Add(edgedevices);
+  alldevices.Add(fabricdevices);
+  
+  // NetDeviceContainer nics; // nics[i] is interface at host i towards leafnode
+  // NetDeviceContainer tordowns; // interface at leafnode towards host
+  // for (uint32_t edgedeviceno = 0; edgedeviceno < edgedevices.GetN(); edgedeviceno++) {
+  //   if (edgedeviceno % 2 == 0)
+  //     nics.Add(edgedevices.Get(edgedeviceno));
+  //   else
+  //     tordowns.Add(edgedevices.Get(edgedeviceno));
+  // }
+  
+  // config up link and down link for each link
+  //  (edgedevice[l].Get(0) and .Get(1) for each l)
+  // TODO
+
+  // assign IP address for each link
+  // TODO
+  InternetStackHelper stack;
+  stack.Install(hosts);
+  stack.Install(leafnodes);
+  stack.Install(spinenodes);
+  
+  // TODO: IP -> L2 for downlinks and IP -> TC -> L2 for uplinks
+  
+  // config down link queues for each link?
+  TrafficControlHelper tch;
+  tch.SetRootQueueDisc (topology2_tch_queuedisc);
+  qdiscs = tch.Install(alldevices);
+  //qdiscs = tch.Install (edgedevices);
+  //qdiscs = tch.Install (fabricdevices);
+  // can also uninstall after assigning IP address, see traffic-control.cc.1
+  
+  // TODO: Queue discs everywhere even switch links (maybe use this for control/ data)
+  
+  for (uint32_t alldeviceno = 0; alldeviceno < alldevices.GetN(); alldeviceno++) {
+    // This will segfault if you didn't add an internal queue and root queue disc
+    Ptr<QueueDisc> q = qdiscs.Get (alldeviceno);
+    q->TraceConnectWithoutContext ("PacketsInQueue", MakeCallback (&TcPacketsInQueueTrace));
+    // Alternatively:
+    // Config::ConnectWithoutContext ("/NodeList/1/$ns3::TrafficControlLayer/RootQueueDiscList/0/PacketsInQueue",
+    //                                MakeCallback (&TcPacketsInQueueTrace));
+  }
+
+  // Queue at all interfaces
+  for (uint32_t alldeviceno = 0; alldeviceno < alldevices.GetN(); alldeviceno++) {
+    // TODO what if .Get(0)
+    // This will segfault if you didn't add a root queue disc (?)
+    Ptr<NetDevice> nd = alldevices.Get (alldeviceno);
+    Ptr<PointToPointNetDevice> ptpnd = DynamicCast<PointToPointNetDevice> (nd);
+    Ptr<Queue> queue = ptpnd->GetQueue ();
+    NS_ASSERT(queue);
+    queue->TraceConnectWithoutContext ("PacketsInQueue", MakeCallback (&DevicePacketsInQueueTrace));
+  }
+
+  // All interfaces have address, note first we added edge links
+  for (uint32_t alldeviceno = 0; alldeviceno < alldevices.GetN(); alldeviceno++) {
+    // link l has base 10.1.l.0, copying Kanthi's format
+    Ipv4AddressHelper address;
+    std::ostringstream subnet;
+    if (alldeviceno < hosts.GetN()*2) {
+      // 144 edge links -> 288 devices
+      uint32_t q = alldeviceno/256; // at most 1 for 288 devices
+      uint32_t div = alldeviceno%256; // NIC index for host h 144 is 288 -> 10.1.33.x
+      subnet << "10." << q << "."<< div<<".0";
+    } else {
+      // 36 fabric links -> 72 devices
+      uint32_t fabdevno = alldeviceno-(hosts.GetN()*2)-1;
+      subnet << "10.2."<< fabdevno <<".0"; // won't overlap with ^
+    }
+    address.SetBase (subnet.str().c_str(), "255.255.255.0");
+    // assign returns two interface addrs (following applies to edge)
+    //  the net device from host to leaf
+    //  and the netdevice from leaf to host
+    //  NOTE!! Ipv4 address of NIC at host h = interfaces.GetAddress(host*2);
+    //  TODO(lav): make function to get this, since it depends on topology setup
+    interfaces.Add(address.Assign (alldevices.Get(alldeviceno)));
   }
   //tch.Uninstall (tordowns);
   // Turn on global static routing, copying from K
@@ -216,7 +334,7 @@ void ConvergenceExperiments::startApp(uint16_t source_port, uint16_t destination
   SendingHelper sending (socketType, remoteAddress);
   sending.SetAttribute ("MaxBytes", UintegerValue (0)); //10 * payloadSize));
   sending.SetAttribute ("PacketSize", UintegerValue (payloadSize));
-  sending.SetAttribute ("InitialDataRate", StringValue ("5Mbps")); //bit/s
+  sending.SetAttribute ("InitialDataRate", StringValue ("10Mbps")); //bit/s
   sending.SetAttribute ("Local", AddressValue(localAddress)); //bit/s
   //if (hostno == 0)
   //  sending.SetAttribute ("HighPriority", BooleanValue (true)); //bit/s
@@ -232,12 +350,21 @@ void ConvergenceExperiments::startApp(uint16_t source_port, uint16_t destination
 // converge early
 void ConvergenceExperiments::startNextEpoch(bool converged_in_previous) {
   NS_LOG_FUNCTION (this);
+
+  if (check_rates_event.IsRunning()) {
+    std::cout << "In startNextEpoch, canceling check_rates_event.\n";
+    check_rates_event.Cancel();
+  }
+  std::cout << "next_epoch will now be " << next_epoch << (converged_in_previous ? ", converged" : ", didn't converge")
+            << " in last epoch " << next_epoch-1 << ". \n";
   
   // NS_ASSERT(event_list.size() > 0);
   bool start_flows_next = event_list.front();
   event_list.pop_front();
   NS_ASSERT(next_epoch > 0);
   if (start_flows_next) {
+    std::cout << "starting " << flows_to_start.at(flows_to_start_next).size()
+	      << " flows in epoch " << next_epoch << "\n";
     // vector, indexing start at 0
     const auto& flows = flows_to_start.at(flows_to_start_next++);    
     for (const auto& f : flows) {
@@ -250,30 +377,31 @@ void ConvergenceExperiments::startNextEpoch(bool converged_in_previous) {
       Ipv4Address destination_address = interfaces.GetAddress(destination*2);
       Ipv4FlowClassifier::FiveTuple t =
         { source_address, destination_address, 6, source_port, destination_port};
-      std::cout << "Starting flow # " << f << ": "
-                << " sourceAddress=" << t.sourceAddress << "/"
-                << " destinationAddress=" << t.destinationAddress << "/"
-                << " protocol=" << t.protocol << "/"
-                << " sourcePort=" << t.sourcePort << "/"
-                << " destinationPort=" << t.destinationPort
-                << " at time " << Simulator::Now() << "\n";
+      // std::cout << "Starting flow # " << f << ": "
+      //           << " sourceAddress=" << t.sourceAddress << "/"
+      //           << " destinationAddress=" << t.destinationAddress << "/"
+      //           << " protocol=" << t.protocol << "/"
+      //           << " sourcePort=" << t.sourcePort << "/"
+      //           << " destinationPort=" << t.destinationPort
+      //           << " at time " << Simulator::Now() << "\n";
       startApp(source_port, destination_port, source, destination, Simulator::Now());
       // NS_ASSERT(flowToAppIndex.find(f) == flowToAppIndex::end)
       flowToAppIndex[f] = sending_apps.GetN()-1;      
       fiveTupleToFlow[t] = f;
       flowToFiveTuple[f] = t;
       active_flows.insert(f);
-      std::cout << "inserted flow " << f << " in active_flows.\n";
+      //std::cout << "inserted flow " << f << " in active_flows.\n";
       // NS_ASSERT(sending_apps.GetN() == sink_apps.GetN())
     }
   } else {
+    std::cout << "stopping flows in epoch " << next_epoch << "\n";
     // vector, indexing start at 0
     const auto& flows = flows_to_stop.at(flows_to_stop_next++);
     for (const auto& f : flows) {
       stopApp(f);
       NS_ASSERT(active_flows.find(f) != active_flows.end());
       active_flows.erase(f);
-      std::cout << "removed flow " << f << " from active_flows.\n";
+      //std::cout << "removed flow " << f << " from active_flows.\n";
     }    
   }
   last_epoch_time = Simulator::Now(); // TODO(lav): not used?
@@ -287,21 +415,20 @@ void ConvergenceExperiments::startNextEpoch(bool converged_in_previous) {
   // for a new epoch
   
   next_epoch++;
-  std::cout << "next_epoch is now " << next_epoch << (converged_in_previous ? ", didn't converge" : ", converged")
-            << " in previous epoch. \n";
    // else {
   //   Simulator::Stop();
   // }
 
   // start checking rates right after adding (check) flows
   // in first epoch
-  if (true and next_epoch == 2) {
+  //  if (true or next_epoch == 2) {
     std::cout << "scheduling checkRates.\n";
+    ninety_fifth_converged = 0;
     check_rates_event =
       Simulator::Schedule(
                           sampling_interval,
                           &ConvergenceExperiments::checkRates, this);
-  }
+    //}
 
 }
 
@@ -315,69 +442,89 @@ void ConvergenceExperiments::checkRates() {
   std::vector<double> small_errors;
   std::vector<double> other_errors;
 
-  Ptr<Ipv4FlowClassifier> classifier =
-   DynamicCast<Ipv4FlowClassifier> (flowmon.GetClassifier ());
-  // std::map<FlowId, FlowMonitor::FlowStats> stats =
-  //   monitor->GetFlowStats ();
+  if (opt_rates.find(next_epoch-1) != opt_rates.end())
+    {
+      Ptr<Ipv4FlowClassifier> classifier =
+	DynamicCast<Ipv4FlowClassifier> (flowmon.GetClassifier ());
+      // std::map<FlowId, FlowMonitor::FlowStats> stats =
+      //   monitor->GetFlowStats ();
 
-  //  std::cout << std::endl << "*** Flow monitor statistics ***" << std::endl;
-  for (const auto& flow_id : active_flows) {
-    FlowId fm_index;// = ((FlowId) flow_id+1);
+      //  std::cout << std::endl << "*** Flow monitor statistics ***" << std::endl;
+      for (const auto& flow_id : active_flows) {
+	FlowId fm_index;// = ((FlowId) flow_id+1);
         bool found = false;
-    if (flowToFlowMonitorIndex.find(flow_id)
-        != flowToFlowMonitorIndex.end()) {
-      fm_index = flowToFlowMonitorIndex.at(flow_id);
-      found = true;
-    } else if (flowToFiveTuple.find(flow_id)
-               != flowToFiveTuple.end()
-               and classifier->FindFlowId(flowToFiveTuple.at(flow_id), fm_index)) {
-      const auto ret =
-        flowToFlowMonitorIndex.insert(
-              std::make_pair(flow_id, fm_index));
-      NS_ASSERT(ret.second);
-      found = true;
-    }
-    if (!found) continue;
-    //std::cout << "found flow " << flow_id << " in flow monitor\n";
-    //NS_ASSERT(stats.find(fm_index) != stats.end());
-    //const FlowMonitor::FlowStats& flow_stats = stats.at(fm_index);
-    // Mb/s
-    //std::cout << "Finding rates for flow " << flow_id << " in epoch " << next_epoch-1 << std::endl;
-    double optimal_rate = 0;
-    auto const& opt_it = opt_rates.at(next_epoch-1).find(flow_id);
-    if (opt_it != opt_rates.at(next_epoch-1).end())
-      optimal_rate = opt_it->second;
-    double stats_rate = monitor->getEwmaRate(fm_index);
-    double measured_rate = stats_rate / 1000000.0;
-    double error = abs(optimal_rate - measured_rate);
+	if (flowToFlowMonitorIndex.find(flow_id)
+	    != flowToFlowMonitorIndex.end()) {
+	  fm_index = flowToFlowMonitorIndex.at(flow_id);
+	  found = true;
+	} else if (flowToFiveTuple.find(flow_id)
+		   != flowToFiveTuple.end()
+		   and classifier->FindFlowId(flowToFiveTuple.at(flow_id), fm_index)) {
+	  const auto ret =
+	    flowToFlowMonitorIndex.insert(
+					  std::make_pair(flow_id, fm_index));
+	  NS_ASSERT(ret.second);
+	  found = true;
+	} 
+	if (!found) {
+	  //if (Simulator::Now() - last_epoch_time > Seconds(1)) //(ninety_fifth_converged == max_iterations_of_goodness)
+            std::cout << "didn't find active flow "
+		      << flow_id << " in flow monitor.\n";	 
+	}
+	//std::cout << "found flow " << flow_id << " in flow monitor\n";
+	//NS_ASSERT(stats.find(fm_index) != stats.end());
+	//const FlowMonitor::FlowStats& flow_stats = stats.at(fm_index);
+	// Mb/s
+	//std::cout << "Finding rates for flow " << flow_id << " in epoch " << next_epoch-1 << std::endl;
+	double optimal_rate = opt_rates.at(next_epoch-1).at(flow_id);
+	double measured_rate = 0;
+	if (found) {
+	  double stats_rate = monitor->getEwmaRate(fm_index);
+	  measured_rate = stats_rate / 1000000.0;
+          // std::cout << "active flow " << flow_id
+	  //           << " has measured rate " << measured_rate << " Mbps"
+	  //           << " and expected rate " << optimal_rate << " Mbps.\n";
+	}
+	double error = optimal_rate - measured_rate;
+        if (error < 0) error = -error;
 
-    // std::cout << "Flow " << flow_id << " has measured rate " << measured_rate << " Mbps"
-    //           << " and expected rate " << optimal_rate << " Mbps.\n";
-    NS_ASSERT(optimal_rate > 0);
-    if (error < 0.1 * optimal_rate) small_errors.push_back(error);
-    else  other_errors.push_back(error);
-    
-    current_total_rate += measured_rate;    
-  }
-  uint32_t total_flows = small_errors.size()+other_errors.size();
-  if (small_errors.size() >= 0.95 * total_flows) {
+	if (ninety_fifth_converged == max_iterations_of_goodness)
+	  std::cout << "Flow " << flow_id
+		    << " has measured rate " << measured_rate << " Mbps"
+		    << " and expected rate " << optimal_rate << " Mbps"
+		    << " and error " << error << " Mbps"
+		    << " which is " << ((error < (0.1 * optimal_rate)) ? " less " : " more ")
+		    <<  " than 10% of optimal (" << (0.1 * optimal_rate) << ") Mbps.\n";
+	NS_ASSERT(optimal_rate > 0);
+	if (error < 0.1 * optimal_rate) small_errors.push_back(error);
+	else  other_errors.push_back(error);    
+	current_total_rate += measured_rate;    
+      }
+      uint32_t total_flows = small_errors.size()+other_errors.size();
+      if (((double)small_errors.size()) >= (0.95 * total_flows)) {
+	ninety_fifth_converged++;
+      } else {
+	ninety_fifth_converged = 0;
+      }
+    } else {
     ninety_fifth_converged++;
-  } else {
-    ninety_fifth_converged = 0;
+    if (ninety_fifth_converged == max_iterations_of_goodness)
+      std::cout << "No flows (ideal) in epoch " << (next_epoch-1) << "\n";
   }
 
   if (ninety_fifth_converged > max_iterations_of_goodness) {
+    std::cout << "We saw " << ninety_fifth_converged
+	      << " iterations of goodness in epoch " << (next_epoch-1)
+	      << ", current total rate is " << current_total_rate << " Mbps";
     ninety_fifth_converged = 0;
     if (next_epoch_event.IsRunning()) {
       std::cout << "Next epoch event is running, cancel.\n";
       next_epoch_event.Cancel();
     }
-
     // start next epoch i.e., add/ remove more flows
     if (event_list.size() > 0) {
       // should be in 0 seconds
-      std::cout << "We saw " << max_iterations_of_goodness
-                << " iterations of goodness, scheduling next epoch event from checkRate in " << 0 << "s.\n";;
+      std::cout << ", scheduling startNextEpoch " << next_epoch << " from checkRate in " << 0 << "s.\n";;
       next_epoch_event = Simulator::Schedule(Seconds(0),
                                              &ConvergenceExperiments::startNextEpoch, this, true);
       // next_epoch++;
@@ -387,8 +534,10 @@ void ConvergenceExperiments::checkRates() {
     }
   }
 
-  // std::cout << Simulator::Now().GetSeconds() << "s Total: "
-  //           << current_total_rate << " Mbps.\n";
+  if (next_epoch%2 == 0) {
+    std::cout << Simulator::Now().GetSeconds() << "s Total: "
+              << current_total_rate << " Mbps.\n";
+  }
    check_rates_event =
      Simulator::Schedule(
                          sampling_interval,
@@ -448,7 +597,7 @@ void ConvergenceExperiments::printSingleFlowStats(const FlowMonitor::FlowStats& 
 void ConvergenceExperiments::printExperimentStatsForWorkload() {
   NS_LOG_FUNCTION (this);
   //mapFlowToFlowMonitorStats();
-
+  
   Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier> (flowmon.GetClassifier ());
   std::map<FlowId, FlowMonitor::FlowStats> stats = monitor->GetFlowStats ();
   std::cout << std::endl << "*** Flow monitor statistics ***" << std::endl;
@@ -467,15 +616,15 @@ void ConvergenceExperiments::printExperimentStatsForWorkload() {
       
     if (found) {
         NS_ASSERT(stats.find(fm_index) != stats.end());
-        
+        const auto& t = flowToFiveTuple.at(flow_id);
         std::cout << "Flow flow=" << flow_id << "/"
-                  << " flowId(FlowMonitor)=" << fm_index <<"\n";
-                  // << "/"
-                  // << " sourceAddress=" << t.sourceAddress << "/"
-                  // << " destinationAddress=" << t.destinationAddress << "/"
-                  // << " protocol=" << int(t.protocol) << "/"
-                  // << " sourcePort=" << t.sourcePort << "/"
-                  // << " destinationPort=" << t.destinationPort << "\n";
+                  << " flowId(FlowMonitor)=" << fm_index
+                  << "/"
+                  << " sourceAddress=" << t.sourceAddress << "/"
+                  << " destinationAddress=" << t.destinationAddress << "/"
+                  << " protocol=" << int(t.protocol) << "/"
+                  << " sourcePort=" << t.sourcePort << "/"
+                  << " destinationPort=" << t.destinationPort << "\n";
       
         printSingleFlowStats(stats.at(fm_index));
     }
@@ -492,27 +641,27 @@ void ConvergenceExperiments::printExperimentStatsForWorkload() {
   }
 
   
-  std::cout << std::endl << "*** TC Layer statistics ***" << std::endl;
+  // std::cout << std::endl << "*** TC Layer statistics ***" << std::endl;
 
-  for (uint32_t  edgedeviceno = 0; edgedeviceno < edgedevices.GetN(); edgedeviceno++) {
-    std::cout << "At edge device num " << edgedeviceno << std::endl;
-      Ptr<QueueDisc> q = qdiscs.Get (edgedeviceno);
-      if (q) {        
-        std::cout << "  Packets dropped by the TC layer: " << q->GetTotalDroppedPackets () << std::endl;
-        std::cout << "  Bytes dropped by the TC layer: " << q->GetTotalDroppedBytes () << std::endl;
-        std::cout << "  Packets requeued by the TC layer: " << q->GetTotalRequeuedPackets () << std::endl;
-      } else {
-        std::cout << "  Couldn't access the TC layer for edgedevice no " << edgedeviceno << std::endl;
-      }
+  // for (uint32_t  edgedeviceno = 0; edgedeviceno < edgedevices.GetN(); edgedeviceno++) {
+  //   std::cout << "At edge device num " << edgedeviceno << std::endl;
+  //     Ptr<QueueDisc> q = qdiscs.Get (edgedeviceno);
+  //     if (q) {        
+  //       std::cout << "  Packets dropped by the TC layer: " << q->GetTotalDroppedPackets () << std::endl;
+  //       std::cout << "  Bytes dropped by the TC layer: " << q->GetTotalDroppedBytes () << std::endl;
+  //       std::cout << "  Packets requeued by the TC layer: " << q->GetTotalRequeuedPackets () << std::endl;
+  //     } else {
+  //       std::cout << "  Couldn't access the TC layer for edgedevice no " << edgedeviceno << std::endl;
+  //     }
     
-    Ptr<NetDevice> nd = edgedevices.Get (edgedeviceno);
-    Ptr<PointToPointNetDevice> ptpnd = DynamicCast<PointToPointNetDevice> (nd);
-    Ptr<Queue> queue = ptpnd->GetQueue ();
-    if (queue)
-      std::cout << "  Packets dropped by the netdevice: " << queue->GetTotalDroppedPackets () << std::endl;
-    else
-      std::cout << "  Couldn't access queue for edgedevice no " << edgedeviceno << std::endl;
-  }
+  //   Ptr<NetDevice> nd = edgedevices.Get (edgedeviceno);
+  //   Ptr<PointToPointNetDevice> ptpnd = DynamicCast<PointToPointNetDevice> (nd);
+  //   Ptr<Queue> queue = ptpnd->GetQueue ();
+  //   if (queue)
+  //     std::cout << "  Packets dropped by the netdevice: " << queue->GetTotalDroppedPackets () << std::endl;
+  //   else
+  //     std::cout << "  Couldn't access queue for edgedevice no " << edgedeviceno << std::endl;
+  // }
 }
 
 
@@ -539,15 +688,15 @@ void ConvergenceExperiments::loadWorkloadFromFiles() {
 void ConvergenceExperiments::loadFlowArrivals() {
   NS_LOG_FUNCTION (this);
   std::ifstream flow_arrivals_file(flow_arrivals_filename, std::ifstream::in);
-  
+  uint32_t last_epoch = 0;
   if (flow_arrivals_file.is_open()) {
     uint32_t epoch, flow_id;
     while (flow_arrivals_file >> epoch >> flow_id) {
-      if (epoch > flows_to_start.size()) {
-        flows_to_start.push_back(std::vector<uint32_t>(1, flow_id));
-      } else {
-        flows_to_start.back().push_back(flow_id);
+      if (epoch > last_epoch) {
+        flows_to_start.push_back(std::vector<uint32_t>());
+	last_epoch = epoch;
       }
+      flows_to_start.back().push_back(flow_id);      
     }
   }
 }
@@ -622,7 +771,8 @@ void ConvergenceExperiments::showWorkloadFromFiles() {
   uint32_t next_flows_to_stop = 0;
   uint32_t next_event = 0;
   uint32_t epoch = next_event+1;
-  while (next_event < event_list.size() && next_event < opt_rates.size()) {    
+  uint32_t num_events = event_list.size();
+  while (next_event < num_events) {// && next_event < opt_rates.size()) {    
     epoch = next_event+1;
     out_str << "epoch " << epoch << ": ";
     bool start_flow_next = event_list.front();
@@ -647,10 +797,12 @@ void ConvergenceExperiments::showWorkloadFromFiles() {
       }
       next_flows_to_stop++;
     }
-    out_str << "; opt_rates (epoch " << next_event+1 << ") ";
-    const auto& rates = opt_rates.at(next_event+1); 
-    for (const auto& it : rates) {
-      out_str << it.first << ": " << it.second << " Mbps ";
+    if (opt_rates.find(epoch) != opt_rates.end()) {
+      out_str << "; opt_rates (epoch " << epoch << ") ";
+      const auto& rates = opt_rates.at(epoch); 
+      for (const auto& it : rates) {
+	out_str << it.first << ": " << it.second << " Mbps ";
+      }
     }
     out_str << "\n";
     next_event++;

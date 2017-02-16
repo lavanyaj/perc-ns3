@@ -244,7 +244,7 @@ FlowMonitor::ReportLastRx (Ptr<FlowProbe> probe, uint32_t flowId, uint32_t packe
       // update rate measurements
       double interArrivalTimeSeconds = interArrivalTime.GetSeconds();
       double instantRate = (packetSize * 8)/interArrivalTimeSeconds;
-      if (stats.rxPackets == 2) {// || instantRate < 10) {
+      if (stats.rxPackets == 2 || instantRate < 10) {
         // first time or if flow was inactive for a long time
         stats.rxEwmaRate = instantRate;
       } else {
@@ -252,7 +252,7 @@ FlowMonitor::ReportLastRx (Ptr<FlowProbe> probe, uint32_t flowId, uint32_t packe
         double sampling_time = interArrivalTimeSeconds * 1e9; // 1200ns at line rate
         double alpha = (1 - exp((-1*sampling_time/ewma_time_constant))); // ~0.015 default
         //exp((-1*interArrivalTimeSeconds*1000/m_ewmaRateConstant)); 
-        double firstTerm = alpha * instantRate;
+        double firstTerm = (alpha) * instantRate;
         double secondTerm = (1-alpha) * stats.rxEwmaRate;
         stats.rxEwmaRate = firstTerm + secondTerm;
       }
