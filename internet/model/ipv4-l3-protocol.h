@@ -52,6 +52,7 @@ class Ipv4RawSocketImpl;
 class IpL4Protocol;
 class Icmpv4L4Protocol;
 
+
 /**
  * \ingroup ipv4
  *
@@ -269,10 +270,6 @@ protected:
    */
   virtual void NotifyNewAggregate ();
 private:
-  /**
-   * \brief Ipv4L3ProtocolTestCase test case.
-   * \relates Ipv4L3ProtocolTestCase
-   */
   friend class ::Ipv4L3ProtocolTestCase;
 
   /**
