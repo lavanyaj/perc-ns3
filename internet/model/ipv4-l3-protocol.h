@@ -23,8 +23,10 @@
 
 #include <list>
 #include <map>
+#include <queue>
 #include <vector>
 #include <stdint.h>
+#include "ns3/data-rate.h"
 #include "ns3/ipv4-address.h"
 #include "ns3/ptr.h"
 #include "ns3/net-device.h"
@@ -52,6 +54,29 @@ class Ipv4RawSocketImpl;
 class IpL4Protocol;
 class Icmpv4L4Protocol;
 
+/**
+ * Modifications for Rcp
+ *  (per-flow rate limiting where flow = 5tuple)
+ *  per-flow queues of packets sent out according to control rate
+ *  a check to send function that runs for every flow every control ipg
+ *  or better in tc layer?
+ *  an extra Rcp header b/n Ip and L2 on every packet
+ *  process header on receiv and add header on send
+ *
+ * Modifications for Frugal
+ *  (per-flow rate limiting)
+ *  per-flow control state and ability to generate new high prio packets
+ *  intercept control packets instead of passing up to L3 and update control state
+ *   and/ or generate new high prio packets. These are IP packets,
+ *   not sure what Flow Monitor gets out of these.
+ *  other option is for app to open up a UDP control socket too, to process control
+ *  packets also, and then send rate using special packet to Ip layer.
+ *  Actually what ^ is, is a layer between app and IP (TCP currently) that intercepts
+ *  all the socket calls, sets up its own socket on the node to send/ receive hi prio
+ *  control packets, or in case of Rcp confusing. And what if we want flow size
+ *  info from application? packets created in boradcas too - line 1010 in
+ *  ipv4-l3-protocol.cc. For size, maybe some way to put in tcp header.
+ */
 
 /**
  * \ingroup ipv4
@@ -78,9 +103,38 @@ class Icmpv4L4Protocol;
  * kernel. Hence it is not possible, for instance, to test a fragmentation
  * attack.
  */
+
+// lav: new, struct that's flow identifier for our experiments
+// TODO(lav): this and related functions should go in a separate file
+// in src/internet/model/perc_flowkey.*
+// TODO(lav): flow-monitor/flow-classifier should have a separate
+// perc flow classifier based on PercFlowkey and ipv4 header
+struct PercFlowkey
+{
+  Ipv4Address sourceAddress;      //!< Source address
+  Ipv4Address destinationAddress; //!< Destination address
+  uint8_t protocol;               //!< Protocol
+  uint16_t sourcePort;            //!< Source port
+  uint16_t destinationPort;       //!< Destination port
+};
+
+// lav: new, struct to store per-flow control info for RCP
+// TODO(lav): this and related functions should go in a separate file
+// in src/internet/model/rcp.*
+struct RcpControlInfo {
+  double rate;
+  uint32_t num_hops;
+};
+
 class Ipv4L3Protocol : public Ipv4
 {
 public:
+  // lav: new, struct to store info of packets queued up to rate limit
+  struct Ipv4SendInfo {
+    Ptr<Packet> packet;
+    Ptr<Ipv4Route> route;
+  };
+
   /**
    * \brief Get the type ID.
    * \return the object TypeId
@@ -164,8 +218,23 @@ public:
    * Higher-level layers call this method to send a packet
    * down the stack to the MAC and PHY layers.
    */
+  
+  // lav: modified, intercept send calls to queue packets for
+  // rate limiting if needed. will break if L4 is not TCP
   void Send (Ptr<Packet> packet, Ipv4Address source, 
              Ipv4Address destination, uint8_t protocol, Ptr<Ipv4Route> route);
+  // lav: rename, old Send function
+  void DoSend (Ptr<Packet> packet, Ipv4Address source, 
+             Ipv4Address destination, uint8_t protocol, Ptr<Ipv4Route> route);
+  // lav: new, Sends a packet of flowkey if available and schedules
+  // next one to be sent according to target_rate
+  void CheckToSend(const PercFlowkey& flowkey);
+  // lav: new, to check if packet is sent as source, not forwarded
+  bool IsSource(Ipv4Address source);
+  // lav: new, returns true if rate limiting flows
+  bool IsRateBased();
+  // lav: new, to check whether it's an ACK to be sent at line rate
+  bool isTcpAck(Ptr<Packet> packet);
   /**
    * \param packet packet to send
    * \param ipHeader IP Header
@@ -454,11 +523,41 @@ private:
    */
   typedef std::map<L4ListKey_t, Ptr<IpL4Protocol> > L4List_t;
 
+  /*
+   * Three kinds of Sends?
+   *  ::Send(packet, ..) called by higher layers, modified to queue packet
+   *  CheckToSend(flowkey) (Scheduled) called to send packet, and schedule next
+   *  DoSend(packet, source, destination, protocol, route) : original send
+   *  SendRealOut(route, packet, ipheader)
+   *  doesn't look like there's any flow set up..
+   */
+  /*
+   * Receive is a callback function registered with devices
+   * remove RcpHeader, forward up on each IpSocket (apparently RcpHeader not used?)
+   * also some callback related to routingProtocol to forward/ deliver etc.
+   * not sure if "pre_set_price" set in tcp header and forwarde up is min rate?
+   * think tcp changes are related to figuring out rates from ack or dctcp related?
+   * Ask K how Rcp works. It's not using info in received packet??
+   */
+  // maybe flowkey should just be five tuple
+  //  and send info just packet and route
+  std::map<PercFlowkey,
+           std::queue<Ipv4SendInfo> > packets_by_flowkey;
+  std::map<PercFlowkey,
+           DataRate> target_rate_by_flowkey;
+  std::map<PercFlowkey,
+           RcpControlInfo> rcp_info_by_flowkey;
+  std::map<PercFlowkey,
+           EventId> send_event_by_flowkey;
+  
   bool m_ipForward;      //!< Forwarding packets (i.e. router mode) state.
   bool m_weakEsModel;    //!< Weak ES model state
   L4List_t m_protocols;  //!< List of transport protocol.
   Ipv4InterfaceList m_interfaces; //!< List of IPv4 interfaces.
   Ipv4InterfaceReverseContainer m_reverseInterfacesContainer; //!< Container of NetDevice / Interface index associations.
+  bool m_rate_based;
+  DataRate m_initial_rate;
+  DataRate m_line_rate;
   uint8_t m_defaultTtl;  //!< Default TTL
   std::map<std::pair<uint64_t, uint8_t>, uint16_t> m_identification; //!< Identification (for each {src, dst, proto} tuple)
   Ptr<Node> m_node; //!< Node attached to stack.
@@ -554,6 +653,26 @@ private:
   MapFragmentsTimers_t m_fragmentsTimers; //!< Expiration events.
 
 };
+
+  std::string GetPercFlowkeyStr(const PercFlowkey& t);
+
+  /**
+ * \brief Less than operator.
+ *
+ * \param t1 the first operand
+ * \param t2 the first operand
+ * \returns true if the operands are equal
+ */
+bool operator < (const PercFlowkey &t1, const PercFlowkey &t2);
+
+/**
+ * \brief Equal to operator.
+ *
+ * \param t1 the first operand
+ * \param t2 the first operand
+ * \returns true if the operands are equal
+ */
+bool operator == (const PercFlowkey &t1, const PercFlowkey &t2);
 
 } // Namespace ns3
 

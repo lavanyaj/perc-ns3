@@ -77,6 +77,11 @@ TcpSocket::GetTypeId (void)
                    MakeUintegerAccessor (&TcpSocket::GetInitialCwnd,
                                          &TcpSocket::SetInitialCwnd),
                    MakeUintegerChecker<uint32_t> ())
+    .AddAttribute ("RateLimited", "Set to true to disable cwnd and ssthresh updates (after initial)",
+                   BooleanValue (false),
+                   MakeBooleanAccessor (&TcpSocket::GetRateLimited,
+                                        &TcpSocket::SetRateLimited),
+                   MakeBooleanChecker ())
     .AddAttribute ("ConnTimeout",
                    "TCP retransmission timeout when opening connection (seconds)",
                    TimeValue (Seconds (3)),

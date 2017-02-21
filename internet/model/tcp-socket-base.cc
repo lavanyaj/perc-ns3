@@ -233,6 +233,7 @@ TcpSocketState::TcpSocketState (void)
     m_ssThresh (0),
     m_initialCWnd (0),
     m_initialSsThresh (0),
+    m_rateLimited(false),
     m_segmentSize (0),
     m_lastAckedSeq (0),
     m_congState (CA_OPEN),
@@ -248,6 +249,7 @@ TcpSocketState::TcpSocketState (const TcpSocketState &other)
     m_ssThresh (other.m_ssThresh),
     m_initialCWnd (other.m_initialCWnd),
     m_initialSsThresh (other.m_initialSsThresh),
+    m_rateLimited (other.m_rateLimited),
     m_segmentSize (other.m_segmentSize),
     m_lastAckedSeq (other.m_lastAckedSeq),
     m_congState (other.m_congState),
@@ -261,6 +263,25 @@ TcpSocketState::TcpCongStateName[TcpSocketState::CA_LAST_STATE] =
 {
   "CA_OPEN", "CA_DISORDER", "CA_CWR", "CA_RECOVERY", "CA_LOSS"
 };
+
+uint32_t
+TcpSocketState::GetNewSsthresh(uint32_t new_ssthresh, const std::string& why_str) const {
+  // std::cout << (m_rateLimited ? "Not going " : "Going ")
+  //           << " to change ssthresh from " << m_ssThresh <<  " to "
+  //           << new_ssthresh << " because" << why_str << std::endl;
+  if (m_rateLimited) return m_ssThresh;
+  return new_ssthresh;
+}
+
+uint32_t
+TcpSocketState::GetNewCwnd(uint32_t new_cwnd, const std::string& why_str) const {
+  // std::cout << (m_rateLimited ? "Not going " : "Going ")
+  //           << " to change cwnd from " << m_cWnd <<  " to "
+  //           << new_cwnd << " because" << why_str << std::endl;
+  if (m_rateLimited) return m_cWnd;
+  return new_cwnd;
+}
+
 
 TcpSocketBase::TcpSocketBase (void)
   : TcpSocket (),
@@ -619,6 +640,18 @@ TcpSocketBase::Bind (const Address &address)
   NS_LOG_LOGIC ("TcpSocketBase " << this << " got an endpoint: " << m_endPoint);
 
   return SetupCallback ();
+}
+
+void
+TcpSocketBase::SetRateLimited (bool rateLimited)
+{
+  m_tcb->m_rateLimited = rateLimited;
+}
+
+bool
+TcpSocketBase::GetRateLimited (void) const
+{
+  return m_tcb->m_rateLimited;
 }
 
 void
@@ -1463,9 +1496,11 @@ TcpSocketBase::FastRetransmit ()
   m_congestionControl->CongestionStateSet (m_tcb, TcpSocketState::CA_RECOVERY);
   m_tcb->m_congState = TcpSocketState::CA_RECOVERY;
 
-  m_tcb->m_ssThresh = m_congestionControl->GetSsThresh (m_tcb,
-                                                        BytesInFlight ());
-  m_tcb->m_cWnd = m_tcb->m_ssThresh + m_dupAckCount * m_tcb->m_segmentSize;
+  m_tcb->m_ssThresh = m_tcb->GetNewSsthresh((m_congestionControl->GetSsThresh (m_tcb,
+                                                                               BytesInFlight ())),
+                                            "FastRetransmit");
+  m_tcb->m_cWnd = m_tcb->GetNewCwnd((m_tcb->m_ssThresh + m_dupAckCount * m_tcb->m_segmentSize),
+                                   "FastRetransmit, reset to ssThresh + num dupacks");
 
   NS_LOG_INFO (m_dupAckCount << " dupack. Enter fast recovery mode." <<
                "Reset cwnd to " << m_tcb->m_cWnd << ", ssthresh to " <<
@@ -1508,7 +1543,7 @@ TcpSocketBase::DupAck ()
     }
   else if (m_tcb->m_congState == TcpSocketState::CA_RECOVERY)
     { // Increase cwnd for every additional dupack (RFC2582, sec.3 bullet #3)
-      m_tcb->m_cWnd += m_tcb->m_segmentSize;
+      m_tcb->m_cWnd = m_tcb->GetNewCwnd((m_tcb->m_cWnd+m_tcb->m_segmentSize), "DupAck on RECOVERY");
       NS_LOG_INFO (m_dupAckCount << " Dupack received in fast recovery mode."
                    "Increase cwnd to " << m_tcb->m_cWnd);
       SendPendingData (m_connected);
@@ -1621,11 +1656,13 @@ TcpSocketBase::ReceivedAck (Ptr<Packet> packet, const TcpHeader& tcpHeader)
                * fast recovery procedure (i.e., if any duplicate ACKs subsequently
                * arrive, execute step 4 of Section 3.2 of [RFC5681]).
                 */
-              m_tcb->m_cWnd = SafeSubtraction (m_tcb->m_cWnd, bytesAcked);
+              m_tcb->m_cWnd = m_tcb->GetNewCwnd(SafeSubtraction (m_tcb->m_cWnd, bytesAcked),
+                                         "ReceiveAck() in RECOVERY on partial ack");
 
               if (segsAcked >= 1)
                 {
-                  m_tcb->m_cWnd += m_tcb->m_segmentSize;
+                  m_tcb->m_cWnd = m_tcb->GetNewCwnd((m_tcb->m_cWnd+m_tcb->m_segmentSize),
+                                             "ReceiveAck() in RECOVERY on partial ack with segsAcked >= 1");
                 }
 
               callCongestionControl = false; // No congestion control on cWnd show be invoked
@@ -1657,8 +1694,9 @@ TcpSocketBase::ReceivedAck (Ptr<Packet> packet, const TcpHeader& tcpHeader)
             }
           else if (ackNumber >= m_recover)
             { // Full ACK (RFC2582 sec.3 bullet #5 paragraph 2, option 1)
-              m_tcb->m_cWnd = std::min (m_tcb->m_ssThresh.Get (),
-                                        BytesInFlight () + m_tcb->m_segmentSize);
+              m_tcb->m_cWnd = m_tcb->GetNewCwnd((std::min (m_tcb->m_ssThresh.Get (),
+                                                    BytesInFlight () + m_tcb->m_segmentSize)),
+                                         "ReceiveAck() in RECOVERY on full ack");
               m_isFirstPartialAck = true;
               m_dupAckCount = 0;
               m_retransOut = 0;
@@ -3056,8 +3094,10 @@ TcpSocketBase::Retransmit ()
     {
       m_congestionControl->CongestionStateSet (m_tcb, TcpSocketState::CA_LOSS);
       m_tcb->m_congState = TcpSocketState::CA_LOSS;
-      m_tcb->m_ssThresh = m_congestionControl->GetSsThresh (m_tcb, BytesInFlight ());
-      m_tcb->m_cWnd = m_tcb->m_segmentSize;
+      m_tcb->m_ssThresh = m_tcb->GetNewSsthresh(m_congestionControl->GetSsThresh (m_tcb, BytesInFlight ()),
+                                                "Retransmit() on entering LOSS");
+      m_tcb->m_cWnd = m_tcb->GetNewCwnd(m_tcb->m_segmentSize,
+                                        "Retransmit() on entering LOSS, reset to segment size");
     }
 
   m_tcb->m_nextTxSequence = m_txBuffer->HeadSequence (); // Restart from highest Ack
@@ -3546,6 +3586,7 @@ TcpSocketBase::SafeSubtraction (uint32_t a, uint32_t b)
 
   return 0;
 }
+
 
 //RttHistory methods
 RttHistory::RttHistory (SequenceNumber32 s, uint32_t c, Time t)

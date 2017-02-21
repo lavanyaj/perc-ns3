@@ -21,6 +21,7 @@
 #include "ns3/packet.h"
 #include "ns3/log.h"
 #include "ns3/callback.h"
+#include "ns3/data-rate.h"
 #include "ns3/ipv4-address.h"
 #include "ns3/ipv4-route.h"
 #include "ns3/node.h"
@@ -42,6 +43,8 @@
 #include "ipv4-interface.h"
 #include "ipv4-raw-socket-impl.h"
 
+#include "tcp-header.h"
+#include "utility" // make_pair
 namespace ns3 {
 
 NS_LOG_COMPONENT_DEFINE ("Ipv4L3Protocol");
@@ -50,6 +53,7 @@ const uint16_t Ipv4L3Protocol::PROT_NUMBER = 0x0800;
 
 NS_OBJECT_ENSURE_REGISTERED (Ipv4L3Protocol);
 
+// lav: modified, added three new attributes RateBased, LineRate and InitialRate
 TypeId 
 Ipv4L3Protocol::GetTypeId (void)
 {
@@ -57,6 +61,23 @@ Ipv4L3Protocol::GetTypeId (void)
     .SetParent<Ipv4> ()
     .SetGroupName ("Internet")
     .AddConstructor<Ipv4L3Protocol> ()
+    .AddAttribute("RateBased",
+                  "Enable or disable rate based like behavior",
+                  BooleanValue(true),
+                  MakeBooleanAccessor (&Ipv4L3Protocol::m_rate_based),
+                  MakeBooleanChecker ())
+    // TODO(lav): change to string
+    .AddAttribute ("LineRate",
+                   "The line rate used for sending ACKS.",
+                   DataRateValue (DataRate ("10Gb/s")),
+                   MakeDataRateAccessor(&Ipv4L3Protocol::m_line_rate),
+                   MakeDataRateChecker ())
+    .AddAttribute ("InitialRate",
+                   "The initial rate used for rate limited flows.",
+                   DataRateValue (DataRate ("100Mb/s")),
+                   MakeDataRateAccessor(
+                                        &Ipv4L3Protocol::m_initial_rate),
+                   MakeDataRateChecker ())
     .AddAttribute ("DefaultTtl",
                    "The TTL value set by default on "
                    "all outgoing packets generated on this node.",
@@ -716,8 +737,111 @@ Ipv4L3Protocol::CallTxTrace (const Ipv4Header & ipHeader, Ptr<Packet> packet,
   m_txTrace (packetCopy, ipv4, interface);
 }
 
+// lav: modified, intercept send calls to queue packets for
+// rate limiting if needed. will break if L4 is not TCP
 void 
 Ipv4L3Protocol::Send (Ptr<Packet> packet, 
+                      Ipv4Address source,
+                      Ipv4Address destination,
+                      uint8_t protocol,
+                      Ptr<Ipv4Route> route) {
+  // would also work for udp header..
+  TcpHeader tcph; 
+  uint32_t bytes_read = packet->PeekHeader(tcph);
+  NS_ASSERT(bytes_read > 0);
+  PercFlowkey flowkey {source, destination, protocol,
+      tcph.GetSourcePort(), tcph.GetDestinationPort()};
+  // lav: why check if is source (?) 
+  if (IsRateBased() && IsSource(source)) {
+    Ipv4SendInfo info = {packet,route};
+    if (packets_by_flowkey.find(flowkey) == packets_by_flowkey.end())
+      {
+        std::cout << "Starting rate-limited flow "
+                  << GetPercFlowkeyStr(flowkey)
+                  << " at rate " << m_initial_rate << "\n";
+        // inital by_flowkey state
+        packets_by_flowkey[flowkey] = std::queue<Ipv4SendInfo>();
+        target_rate_by_flowkey[flowkey] = m_initial_rate;
+        send_event_by_flowkey[flowkey] = EventId();
+        NS_ASSERT(!send_event_by_flowkey.at(flowkey).IsRunning());
+        packets_by_flowkey.at(flowkey).push(info);
+        CheckToSend(flowkey);
+      } else {
+      packets_by_flowkey.at(flowkey).push(info);
+      //NS_ASSERT(send_event_by_flowkey.at(flowket).IsRunning());
+      if (!send_event_by_flowkey.at(flowkey).IsRunning())
+        CheckToSend(flowkey);
+      // TODO(lav): look out for if this fails
+      // TODO(lav): schedule CheckToSend as long as
+      // we haven't yet seen a FIN.
+      // Currently this assert will fail if packet queue
+      // for flowkey ran empty and we stopped scheduling.
+    }      
+  } else {
+    DoSend(packet, source, destination, protocol, route);
+    //}
+  }
+  return;
+}
+
+// lav: new, Sends a packet of flowkey if available and schedules
+// next one to be sent according to target_rate
+void
+Ipv4L3Protocol::CheckToSend(const PercFlowkey& flowkey) {
+  NS_ASSERT(packets_by_flowkey.find(flowkey) !=
+            packets_by_flowkey.end());
+  
+  if (packets_by_flowkey.at(flowkey).empty()) return;
+  Ipv4SendInfo info = packets_by_flowkey.at(flowkey).front();
+  packets_by_flowkey.at(flowkey).pop();
+  DoSend(info.packet, flowkey.sourceAddress,
+         flowkey.destinationAddress, flowkey.protocol,
+         info.route);
+  // Schedule next packet
+  DataRate data_rate = target_rate_by_flowkey.at(flowkey);
+  double rate = static_cast<double>(data_rate.GetBitRate ());
+  NS_ASSERT(rate > 0);
+  // TODO(lav): we shouldn't queue acks in the first place!?
+  if (isTcpAck(info.packet)) rate =
+                   static_cast<double>(m_line_rate.GetBitRate ());;
+  // TODO(lav): tcp header size is 46? avoid constants
+  // rate is in Mbps.
+  // Time till next packet
+  double dur = ((info.packet->GetSize() + 46) * 8.0)/ rate;
+
+  send_event_by_flowkey.at(flowkey) = Simulator::Schedule
+    (Seconds(dur), &Ipv4L3Protocol::CheckToSend, this, flowkey);
+  return;
+}
+
+// lav: new, to check whether it's an ACK to be sent at line rate
+bool
+Ipv4L3Protocol::isTcpAck(Ptr<Packet> packet) {
+  TcpHeader tcph;
+  packet->PeekHeader(tcph);
+  if (packet->GetSize() - tcph.GetSerializedSize() == 0)
+    return true;
+  return false;
+}
+
+// lav: new, returns true if rate limiting flows
+bool
+Ipv4L3Protocol::IsRateBased() {
+  return m_rate_based;
+}
+
+// lav: new, to check if packet is sent as source, not forwarded
+bool
+Ipv4L3Protocol::IsSource(Ipv4Address source) {
+  if (GetInterfaceForAddress(source) != -1) {
+    return true;
+  }
+  return false;
+
+}
+// lav: rename, old Send function
+void 
+Ipv4L3Protocol::DoSend (Ptr<Packet> packet, 
                       Ipv4Address source,
                       Ipv4Address destination,
                       uint8_t protocol,
@@ -1705,4 +1829,75 @@ Ipv4L3Protocol::HandleFragmentsTimeout (std::pair<uint64_t, uint32_t> key, Ipv4H
   m_fragments.erase (key);
   m_fragmentsTimers.erase (key);
 }
+
+std::string GetPercFlowkeyStr(const PercFlowkey& t) {
+  std::stringstream ss;
+  ss << t.sourceAddress << ":" << t.sourcePort
+     << ":" << t.destinationAddress
+     << ":" << t.destinationPort << ":" << t.protocol;
+  return ss.str();
+}
+
+//  Comparison operators for FlowKey (based on Ipv4FlowClassifier::FiveTuple)
+  bool operator < (const PercFlowkey &t1,
+                 const PercFlowkey &t2)
+{
+  if (t1.sourceAddress < t2.sourceAddress)
+    {
+      return true;
+    }
+  if (t1.sourceAddress != t2.sourceAddress)
+    {
+      return false;
+    }
+
+  if (t1.destinationAddress < t2.destinationAddress)
+    {
+      return true;
+    }
+  if (t1.destinationAddress != t2.destinationAddress)
+    {
+      return false;
+    }
+
+  if (t1.protocol < t2.protocol)
+    {
+      return true;
+    }
+  if (t1.protocol != t2.protocol)
+    {
+      return false;
+    }
+
+  if (t1.sourcePort < t2.sourcePort)
+    {
+      return true;
+    }
+  if (t1.sourcePort != t2.sourcePort)
+    {
+      return false;
+    }
+
+  if (t1.destinationPort < t2.destinationPort)
+    {
+      return true;
+    }
+  if (t1.destinationPort != t2.destinationPort)
+    {
+      return false;
+    }
+
+  return false;
+}
+
+bool operator == (const PercFlowkey &t1,
+                  const PercFlowkey &t2)
+{
+  return (t1.sourceAddress      == t2.sourceAddress &&
+          t1.destinationAddress == t2.destinationAddress &&
+          t1.protocol           == t2.protocol &&
+          t1.sourcePort         == t2.sourcePort &&
+          t1.destinationPort    == t2.destinationPort);
+}
+
 } // namespace ns3

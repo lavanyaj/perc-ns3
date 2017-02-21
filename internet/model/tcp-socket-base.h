@@ -155,7 +155,8 @@ public:
   TracedValue<uint32_t>  m_ssThresh;        //!< Slow start threshold
   uint32_t               m_initialCWnd;     //!< Initial cWnd value
   uint32_t               m_initialSsThresh; //!< Initial Slow Start Threshold value
-
+  bool m_rateLimited;
+  
   // Segment
   uint32_t               m_segmentSize;     //!< Segment size
   SequenceNumber32       m_lastAckedSeq;    //!< Last sequence ACKed
@@ -183,6 +184,30 @@ public:
   {
     return m_ssThresh / m_segmentSize;
   }
+
+  /**
+   * \brief Returns new_cwnd only if we're window_based else returns old value
+   *
+   * Use as wrapper around all assignments to cwnd, so we can switch b/n window and rate based
+   * easily.
+   *
+   * \param new value of cwnd
+   * \param string that explains why we're changing cwnd, used in logs
+   */
+
+  uint32_t GetNewCwnd(uint32_t new_cwnd, const std::string& why_str) const;
+
+  /**
+   * \brief Returns new_ssthresh only if we're window_based else returns old value
+   *
+   * Use as wrapper around all assignments to ssthresh, so we can switch b/n window and rate based
+   * easily.
+   *
+   * \param new value of ssthresh
+   * \param string that explains why we're changing ssthresh, used in logs
+   */
+  uint32_t GetNewSsthresh(uint32_t new_ssthresh, const std::string& why_str) const;
+
 };
 
 /**
@@ -265,6 +290,14 @@ public:
  *
  * The algorithm is implemented in the ReceivedAck method.
  *
+ * Changes for Rate Limited Algorithm, basic idea is set initCwnd to be high and never change it.
+ * Call SetInitialCwnd from xx. Slow start threshold doesn't matter? Set it to be high too?
+ * cWnd changed in FastRetransmit (ssThresh+ dupAckCount * segment size) called on DupAck() in DISORDER
+ * cWnd changed in DupAck() called on DupAck() in RECOVERY += segment size
+ * cWnd changed in ReceiveAck() in RECOVERY in case of partial ack SafeSubtraction(cWnd, bytesAcked)
+ *  and in RECOVERY in case of  full ack min(ssThresh, BytesInFlight + segmentSize
+ * In ReceiveAck() if (callCongestionControl) .. ->IncreaseWindow(..)
+ * In Retransmit() and congState != LOSS m_cWnd = segmentSize 
  */
 class TcpSocketBase : public TcpSocket
 {
@@ -467,6 +500,8 @@ protected:
   virtual uint32_t GetInitialSSThresh (void) const;
   virtual void     SetInitialCwnd (uint32_t cwnd);
   virtual uint32_t GetInitialCwnd (void) const;
+  virtual void SetRateLimited (bool rateLimited);
+  virtual bool GetRateLimited (void) const;  
   virtual void     SetConnTimeout (Time timeout);
   virtual Time     GetConnTimeout (void) const;
   virtual void     SetSynRetries (uint32_t count);
@@ -963,6 +998,7 @@ protected:
    */
   void AddOptionTimestamp (TcpHeader& header);
 
+  
   /**
    * \brief Performs a safe subtraction between a and b (a-b)
    *

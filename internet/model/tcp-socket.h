@@ -157,6 +157,18 @@ private:
   virtual uint32_t GetInitialCwnd (void) const = 0;
 
   /**
+   * \brief Set to true if rate limited to disable cwnd, ssthresh updates.
+   * \param true if rate limited
+   */
+  virtual void SetRateLimited (bool rateLimited) {};
+
+  /**
+   * \brief Get rate limited status
+   * \returns true if rate limited and cwnd, ssthresh updates disabled.
+   */
+  virtual bool GetRateLimited (void) const {return false;};
+
+  /**
    * \brief Set the connection timeout.
    * \param timeout the connection timeout
    */
