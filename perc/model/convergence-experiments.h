@@ -116,28 +116,55 @@ private:
   bool using_files = false; // true if we load workload from files
 
   // Constants
-  double simulationTime = 10; //seconds
-  uint32_t payloadSize = 1448;
+  double simulationTime = 10; //seconds  
+
   // maximum number of iterations of goodness before moving on
-  const uint32_t max_iterations_of_goodness = 2500;
+   uint32_t max_iterations_of_goodness = 2500;
   // maximum time before changing epoch
-  Time max_epoch_seconds = Seconds(5);
-  Time sampling_interval = MicroSeconds(100); // 20us
-  const std::string topology1_edgep2p_datarate = "10Mbps";
-  const std::string topology1_edgep2p_delay = "2ms";
-  const std::string topology1_tch_queuedisc = "ns3::PfifoFastQueueDisc";
+  Time max_epoch_seconds = Seconds(0.5);
+  Time sampling_interval = MicroSeconds(200); // 20us
 
-  const std::string topology2_edgep2p_datarate = "10Gbps";
-  const std::string topology2_edgep2p_delay = "10us";
-  const std::string topology2_fabricp2p_datarate = "40Gbps";
-  const std::string topology2_fabricp2p_delay = "10us";
-  const std::string topology2_tch_queuedisc = "ns3::PfifoFastQueueDisc";
 
+  // Tcp Socket attributes
+   uint32_t tcpsocket_initialCwnd = 10000; // number of segments
+   uint32_t tcpsocket_initialSlowStartThreshold = 14480000;
+   uint32_t tcpsocket_segmentSize = 1448;
+  
+   bool rateLimited = true;
+
+  // Tcp L4 Protocol attributes (TCP Congestion control variant)
+  std::string tcpl4protocol_socketType = "ns3::TcpNewReno";
+  std::string socketType = "ns3::TcpSocketFactory";
+
+  // Sending Application attributes
+   uint32_t sendingapplication_maxBytes = 0;
+   uint32_t sendingapplication_packetSize = 1448;
+   std::string sendingapplication_initialDataRate = "10Gbps";
+
+  // IP attributes (related to rate limiting)
+   std::string ipv4l3protocol_lineRate = "10Gbps";
+   std::string ipv4l3protocol_initialRate = "100Mbps";  
+
+  // Flow monitor attributes
+   double flowmonitor_ewmaTimeConstant = 80000; //ns
+  
+   std::string topology1_edgep2p_datarate = "10Mbps";
+   std::string topology1_edgep2p_delay = "2ms";
+   std::string topology1_tch_queuedisc = "ns3::PfifoFastQueueDisc";
+
+   std::string topology2_edgep2p_datarate = "10Gbps";
+   std::string topology2_edgep2p_delay = "10us";
+   std::string topology2_fabricp2p_datarate = "40Gbps";
+   std::string topology2_fabricp2p_delay = "10us";
+   std::string topology2_tch_queuedisc = "ns3::PfifoFastQueueDisc";
+
+  // print flow stats to stdout every sampling interval
+  bool showTotal = false;
+  
   NodeContainer hosts;  
   NodeContainer leafnodes;
   NodeContainer spinenodes; // only used in topology2
-  std::string transportProt = "Tcp";
-  std::string socketType = "ns3::TcpSocketFactory";
+  // Used for Sending Application and packetSink
   NetDeviceContainer edgedevices;
   NetDeviceContainer fabricdevices; // only used in topology2
   NetDeviceContainer alldevices; // only used in topology2

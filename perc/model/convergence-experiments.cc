@@ -56,9 +56,10 @@ DevicePacketsInQueueTrace (uint32_t oldValue, uint32_t newValue)
 
 void ConvergenceExperiments::run() {
   NS_LOG_FUNCTION (this);
+  setConfigDefaults();
+  
   createTopology2();
   if (event_list.size() > 0) startNextEpoch(false);
-  setConfigDefaults();
   setupFlowMonitor();
   
   Simulator::Stop (Seconds (simulationTime + 5));
@@ -71,8 +72,43 @@ void ConvergenceExperiments::run() {
 void ConvergenceExperiments::parseCmdConfig(int argc, char *argv[]) {
   NS_LOG_FUNCTION (this);
   CommandLine cmd;
-  cmd.AddValue ("transportProt", "Transport protocol to use: Tcp, Udp", transportProt);
+
+  cmd.AddValue ("sendingapplication_maxBytes", "", sendingapplication_maxBytes);
+  cmd.AddValue ("sendingapplication_packetSize", "", sendingapplication_packetSize);
+  cmd.AddValue ("sendingapplication_initialDataRate", "", sendingapplication_initialDataRate);
+
+  cmd.AddValue ("rateLimited", "", rateLimited);
+  cmd.AddValue ("ipv4l3protocol_lineRate", "", ipv4l3protocol_lineRate);
+  cmd.AddValue ("ipv4l3protocol_initialRate", "", ipv4l3protocol_initialRate);
+
+  cmd.AddValue ("tcpsocket_initialCwnd", "", tcpsocket_initialCwnd);
+  cmd.AddValue ("tcpsocket_initialSlowStartThreshold", "", tcpsocket_initialSlowStartThreshold);
+  cmd.AddValue ("tcpsocket_segmentSize", "", tcpsocket_segmentSize);
+
+  cmd.AddValue ("tcpl4protocol_socketType", "", tcpl4protocol_socketType);
+
+  cmd.AddValue ("flowmonitor_ewmaTimeConstant", "", flowmonitor_ewmaTimeConstant);
+
+  cmd.AddValue ("topology2_edgep2p_datarate", "", topology2_edgep2p_datarate);
+  cmd.AddValue ("topology2_edgep2p_delay", "", topology2_edgep2p_delay);
+  cmd.AddValue ("topology2_fabricp2p_datarate", "", topology2_fabricp2p_datarate);
+  cmd.AddValue ("topology2_fabricp2p_delay", "", topology2_fabricp2p_delay);
+  cmd.AddValue ("topology2_tch_queuedisc", "", topology2_tch_queuedisc);
+
+
+  double max_epoch_seconds_dbl = max_epoch_seconds.GetSeconds();
+  double sampling_interval_us_dbl = sampling_interval.GetMicroSeconds();
+  cmd.AddValue ("max_epoch_seconds", "", max_epoch_seconds_dbl);
+  cmd.AddValue ("sampling_interval", "in microseconds", sampling_interval_us_dbl);
+
+  cmd.AddValue ("simulationTime", "in seconds", simulationTime);
+  cmd.AddValue ("max_iterations_of_goodness", "", max_iterations_of_goodness);
+  
   cmd.Parse (argc, argv);
+
+  max_epoch_seconds = Seconds(max_epoch_seconds_dbl);
+  sampling_interval = MicroSeconds(sampling_interval_us_dbl);
+
 }
 
 ConvergenceExperiments::ConvergenceExperiments() {
@@ -332,9 +368,6 @@ void ConvergenceExperiments::startApp(uint16_t source_port, uint16_t destination
   localAddress =  Address(InetSocketAddress (interfaces.GetAddress (source_host*2), source_port));
 
   SendingHelper sending (socketType, remoteAddress);
-  sending.SetAttribute ("MaxBytes", UintegerValue (0)); //10 * payloadSize));
-  sending.SetAttribute ("PacketSize", UintegerValue (payloadSize));
-  sending.SetAttribute ("InitialDataRate", StringValue ("10Mbps")); //bit/s
   sending.SetAttribute ("Local", AddressValue(localAddress)); //bit/s
   //if (hostno == 0)
   //  sending.SetAttribute ("HighPriority", BooleanValue (true)); //bit/s
@@ -534,7 +567,7 @@ void ConvergenceExperiments::checkRates() {
     }
   }
 
-  if (next_epoch%2 == 0) {
+  if (next_epoch%2 == 0 and showTotal) {
     std::cout << Simulator::Now().GetSeconds() << "s Total: "
               << current_total_rate << " Mbps.\n";
   }
@@ -583,10 +616,13 @@ void ConvergenceExperiments::printSingleFlowStats(const FlowMonitor::FlowStats& 
   std::cout << "  Tx Bytes:   " << flow_stats.txBytes << std::endl;
   std::cout << "  FCT (timeFirstTx to timeLastRx): " << (flow_stats.timeLastRxPacket.GetSeconds () - flow_stats.timeFirstTxPacket.GetSeconds ()) << " s" << std::endl;
   std::cout << "  Offered Load: " << flow_stats.txBytes * 8.0 / (flow_stats.timeLastTxPacket.GetSeconds () - flow_stats.timeFirstTxPacket.GetSeconds ()) / 1000000 << " Mbps" << std::endl;
+  std::cout << "  (timeFirstTx to timeLastTx): " << (flow_stats.timeLastTxPacket.GetSeconds () - flow_stats.timeFirstTxPacket.GetSeconds ()) << " s" << std::endl;
+
   std::cout << "  Rx Packets:   " << flow_stats.rxPackets << std::endl;
   std::cout << "  Rx Bytes:   " << flow_stats.rxBytes << std::endl;
   
   std::cout << "  Throughput: " << flow_stats.rxBytes * 8.0 / (flow_stats.timeLastRxPacket.GetSeconds () - flow_stats.timeFirstRxPacket.GetSeconds ()) / 1000000 << " Mbps" << std::endl;
+  std::cout << "  (timeFirstRx to timeLastRx): " << (flow_stats.timeLastRxPacket.GetSeconds () - flow_stats.timeFirstRxPacket.GetSeconds ()) << " s" << std::endl;
   std::cout << "  EWMA rate of packets at receiver: " << flow_stats.rxEwmaRate / 1000000 << " Mbps" << std::endl;
   std::cout << "  Mean delay:   " << flow_stats.delaySum.GetSeconds () / flow_stats.rxPackets << std::endl;
   std::cout << "  Mean jitter:   " << flow_stats.jitterSum.GetSeconds () / (flow_stats.rxPackets - 1) << std::endl;
@@ -632,6 +668,8 @@ void ConvergenceExperiments::printExperimentStatsForWorkload() {
   
 
   std::cout << std::endl << "*** Application statistics ***" << std::endl;
+  std::cout << "For simulation time " << simulationTime << std::endl;
+  
   for (uint32_t i = 0; i < sink_apps.GetN(); i++) {
     double thr = 0;
     uint32_t totalPacketsThr = DynamicCast<PacketSink> (sink_apps.Get (i))->GetTotalRx ();
@@ -667,7 +705,39 @@ void ConvergenceExperiments::printExperimentStatsForWorkload() {
 
 void ConvergenceExperiments::setConfigDefaults() {
   NS_LOG_FUNCTION (this);
-  Config::SetDefault ("ns3::TcpSocket::SegmentSize", UintegerValue (payloadSize));
+
+  Config::SetDefault ("ns3::Ipv4L3Protocol::RateBased",
+                      BooleanValue(rateLimited));
+  Config::SetDefault ("ns3::Ipv4L3Protocol::LineRate",
+                      DataRateValue(DataRate(ipv4l3protocol_lineRate)));
+  Config::SetDefault ("ns3::Ipv4L3Protocol::InitialRate",
+                 DataRateValue(DataRate(ipv4l3protocol_initialRate)));
+  
+
+  Config::SetDefault ("ns3::TcpSocket::SegmentSize",
+                      UintegerValue (tcpsocket_segmentSize));
+  Config::SetDefault("ns3::TcpSocket::RateLimited",
+                       BooleanValue (rateLimited));
+  if (rateLimited) {
+  Config::SetDefault ("ns3::TcpSocket::InitialCwnd",
+                      UintegerValue (tcpsocket_initialCwnd));
+  Config::SetDefault ("ns3::TcpSocket::InitialSlowStartThreshold",
+                 UintegerValue (tcpsocket_initialSlowStartThreshold));
+  }
+  
+  Config::SetDefault ("ns3::SendingApplication::MaxBytes",
+                        UintegerValue (sendingapplication_maxBytes));
+  Config::SetDefault ("ns3::SendingApplication::PacketSize",
+                      UintegerValue (sendingapplication_packetSize));
+  Config::SetDefault ("ns3::SendingApplication::InitialDataRate",
+                      DataRateValue (DataRate(sendingapplication_initialDataRate)));
+
+  Config::SetDefault ("ns3::FlowMonitor::EwmaTimeConstant",
+                      DoubleValue(flowmonitor_ewmaTimeConstant));
+  
+  Config::SetDefault ("ns3::TcpL4Protocol::SocketType",
+                      StringValue (tcpl4protocol_socketType));
+
 }
 
 void ConvergenceExperiments::setupFlowMonitor() {

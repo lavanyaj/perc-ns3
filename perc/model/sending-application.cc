@@ -32,6 +32,8 @@
 #include "ns3/data-rate.h"
 #include "ns3/random-variable-stream.h"
 #include "ns3/socket.h"
+#include "ns3/tcp-socket-factory.h"
+#include "ns3/tcp-socket.h"
 #include "ns3/simulator.h"
 #include "ns3/socket-factory.h"
 #include "ns3/packet.h"
@@ -163,6 +165,7 @@ void SendingApplication::StartApplication () // Called at time specified by Star
   if (!m_socket)
     {
       m_socket = Socket::CreateSocket (GetNode (), m_tid);
+      
       // TCP Bind and Connect overwrite IpTos ?? http://www.mehic.info/2016/11/socketsetiptos-in-ns-3-ver-3-26/
       if (m_hiPrio) m_socket->SetIpTos(16);
 
